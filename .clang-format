@@ -1,0 +1,34 @@
+---
+AlignAfterOpenBracket: AlwaysBreak
+AlignConsecutiveDeclarations: true
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortFunctionsOnASingleLine: true
+AlwaysBreakBeforeMultilineStrings: true
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterControlStatement: true
+  AfterEnum: true
+  AfterFunction: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeElse: true
+  IndentBraces: false
+ColumnLimit: 100
+DerivePointerAlignment: false
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"(\.\./)?(([a-z_]+/)+)?[a-z_0-9]+\.h"$'
+    Priority: 1
+  - Regex: '^<(std[a-z]*|assert|ctype|float|inttypes|limits|math|string|tgmath)\.h>$'
+    Priority: 99
+  - Regex: '^<[^>]+>$'
+    Priority: 2
+IndentCaseLabels: false
+IndentWidth: 4
+PointerAlignment: Left
+PointerBindsToType: true
+SortIncludes: CaseInsensitive
+SpaceBeforeParens: ControlStatements
+UseTab: Never
+...
