@@ -20,7 +20,7 @@ IncludeBlocks: Regroup
 IncludeCategories:
   - Regex: '^"(\.\./)?(([a-z_]+/)+)?[a-z_0-9]+\.h"$'
     Priority: 1
-  - Regex: '^<(std[a-z]*|assert|ctype|float|inttypes|limits|math|string|tgmath)\.h>$'
+  - Regex: '^<([a-z_][a-z_0-9]*|(std[a-z]*|assert|ctype|float|inttypes|limits|math|string|tgmath)\.h)>$'
     Priority: 99
   - Regex: '^<[^>]+>$'
     Priority: 2
