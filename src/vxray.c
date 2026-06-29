@@ -95,9 +95,14 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         return SDL_APP_FAILURE;
     }
     vxray_instance.window_claimed = true;
-    assert(SDL_SetGPUSwapchainParameters(
-        vxray_instance.gpu_device, vxray_instance.window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR,
-        SDL_GPU_PRESENTMODE_VSYNC));
+    if (!SDL_SetGPUSwapchainParameters(
+            vxray_instance.gpu_device, vxray_instance.window,
+            SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR, SDL_GPU_PRESENTMODE_VSYNC))
+    {
+        SDL_LogError(
+            SDL_LOG_CATEGORY_GPU, "Couldn't set GPU swapchain parameters: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
 
     // Graphics pipeline
 
