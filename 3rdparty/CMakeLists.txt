@@ -2,6 +2,11 @@ include(FetchContent)
 
 # Declare
 
+FetchContent_Declare(ogt
+                     GIT_REPOSITORY "https://github.com/jpaver/opengametools"
+                     GIT_TAG dcabf82345979a2d937a5ea29a0b14683a3aa838 # Mar 20, 2026
+                     GIT_SHALLOW ON)
+
 FetchContent_Declare(sdl3
                      GIT_REPOSITORY "https://github.com/libsdl-org/SDL"
                      GIT_TAG 8e37db5e797b6167f3a00d697d816a684bd259c7 # v3.4.10
@@ -14,6 +19,9 @@ FetchContent_Declare(sdl-shadercross
 
 # Fetch
 
+message(STATUS "Fetching opengametools...")
+FetchContent_MakeAvailable(ogt)
+
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 message(STATUS "Fetching SDL...")
 FetchContent_MakeAvailable(sdl3)
@@ -25,3 +33,8 @@ set(SDLSHADERCROSS_VENDORED ON CACHE BOOL "" FORCE)
 set(SDLSHADERCROSS_CLI OFF CACHE BOOL "" FORCE)
 message(STATUS "Fetching SDL_shadercross...")
 FetchContent_MakeAvailable(sdl-shadercross)
+
+# Configure
+
+add_library(ogt INTERFACE)
+target_include_directories(ogt INTERFACE ${ogt_SOURCE_DIR}/src)
