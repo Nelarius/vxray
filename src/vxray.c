@@ -1,16 +1,23 @@
+#include "cvox.h"
+
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_init.h>
+#include <SDL3/SDL_iostream.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_platform_defines.h>
+#include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 
 #if defined(SDL_PLATFORM_APPLE)
 
@@ -48,8 +55,33 @@ static vxray vxray_instance = {0};
 SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
-    (void)argc;
-    (void)argv;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: %s <file.vox>\n", argv[0]);
+        return SDL_APP_FAILURE;
+    }
+
+    {
+        char const* vox_file = argv[1];
+
+        SDL_PathInfo info;
+        if (!SDL_GetPathInfo(vox_file, &info))
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_ERROR, "%s doesn't exist", vox_file);
+            return SDL_APP_FAILURE;
+        }
+
+        size_t   num_bytes;
+        uint8_t* buffer = SDL_LoadFile(vox_file, &num_bytes);
+        assert(buffer);
+
+        cvox_scene const* const scene = cvox_read_scene(buffer, num_bytes);
+        (void)scene;
+
+        cvox_destroy_scene(scene);
+        SDL_free(buffer);
+    }
 
     // Init
 

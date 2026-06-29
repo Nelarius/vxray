@@ -3,7 +3,7 @@
 #define OGT_VOX_IMPLEMENTATION
 #include <ogt_vox.h>
 
-#include <cstring>
+#include <stddef.h>
 #include <stdint.h>
 
 static_assert(sizeof(cvox_rgba) == sizeof(ogt_vox_rgba));
