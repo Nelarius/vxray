@@ -1,5 +1,5 @@
 #include "cvox.h"
-#include "dda.h"
+#include "hlsl_shim.h"
 
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_error.h>
@@ -52,10 +52,10 @@
 
 #define vx_buffer(T) vx_##T##_buffer
 
-#define calloc_vx_buffer(T, N, flags)                                                              \
+#define vx_buffer_calloc(T, N)                                                                     \
     (vx_##T##_buffer) { .ptr = calloc((N), sizeof(T)), .count = (N) }
 
-#define free_vx_buffer(b) free((b).ptr)
+#define vx_buffer_free(b) free((b).ptr)
 
 vx_buffer_decl(uint8_t);
 
@@ -75,38 +75,23 @@ static uint32_t next_power_of_2(uint32_t x)
     return x;
 }
 
-typedef struct vx_vec3
+static float3 vx_transform_point(cvox_transform const* const t, float3 const p)
 {
-    float x;
-    float y;
-    float z;
-} vx_vec3;
-
-typedef struct vx_int3
-{
-    int32_t x;
-    int32_t y;
-    int32_t z;
-} vx_int3;
-
-static vx_vec3 vx_transform_point(cvox_transform const* const t, vx_vec3 const p)
-{
-    vx_vec3 const result = {
+    float3 const result = {
         .x = t->m30 + (t->m00 * p.x) + (t->m10 * p.y) + (t->m20 * p.z),
         .y = t->m31 + (t->m01 * p.x) + (t->m11 * p.y) + (t->m21 * p.z),
         .z = t->m32 + (t->m02 * p.x) + (t->m12 * p.y) + (t->m22 * p.z)};
     return result;
 }
 
-static int32_t vx_round_to_int(float const val)
+static int vx_round_to_int(float const val)
 {
-    return (int32_t)(val >= 0.f ? (val + 0.5f) : (val - 0.5f));
+    return (int)(val >= 0.f ? (val + 0.5f) : (val - 0.5f));
 }
 
-static int32_t
-vx_grid_index(int32_t const x, int32_t const y, int32_t const z, int32_t const grid_size)
+static int vx_grid_index(int const x, int const y, int const z, int const grid_ext)
 {
-    return x + (y * grid_size) + (z * grid_size * grid_size);
+    return x + (y * grid_ext) + (z * grid_ext * grid_ext);
 }
 
 typedef struct vxray
@@ -154,17 +139,18 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
+        SDL_free(buffer);
+
         if (scene->num_instances == 0 || scene->num_models == 0)
         {
             SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Scene has no instances or models");
             cvox_destroy_scene(scene);
-            SDL_free(buffer);
             return SDL_APP_FAILURE;
         }
 
-        vx_int3 scene_min = {.x = INT32_MAX, .y = INT32_MAX, .z = INT32_MAX};
-        vx_int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
-        bool    has_valid_bounds = false;
+        int3 scene_min = {.x = INT32_MAX, .y = INT32_MAX, .z = INT32_MAX};
+        int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
+        bool has_valid_bounds = false;
 
         for (uint32_t i = 0; i < scene->num_instances; ++i)
         {
@@ -187,17 +173,17 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             float const max_y = size_y_f > 0.0f ? (size_y_f - 1.0f) : 0.0f;
             float const max_z = size_z_f > 0.0f ? (size_z_f - 1.0f) : 0.0f;
 
-            vx_vec3 const corners[8] = {{0.f, 0.f, 0.f},     {max_x, 0.f, 0.f},
-                                        {0.f, max_y, 0.f},   {0.f, 0.f, max_z},
-                                        {max_x, max_y, 0.f}, {max_x, 0.f, max_z},
-                                        {0.f, max_y, max_z}, {max_x, max_y, max_z}};
+            float3 const corners[8] = {{0.f, 0.f, 0.f},     {max_x, 0.f, 0.f},
+                                       {0.f, max_y, 0.f},   {0.f, 0.f, max_z},
+                                       {max_x, max_y, 0.f}, {max_x, 0.f, max_z},
+                                       {0.f, max_y, max_z}, {max_x, max_y, max_z}};
 
-            for (int32_t c = 0; c < 8; ++c)
+            for (int c = 0; c < 8; ++c)
             {
-                vx_vec3 const tc = vx_transform_point(&transform, corners[c]);
-                int32_t const rx = vx_round_to_int(tc.x);
-                int32_t const ry = vx_round_to_int(tc.y);
-                int32_t const rz = vx_round_to_int(tc.z);
+                float3 const tc = vx_transform_point(&transform, corners[c]);
+                int const    rx = vx_round_to_int(tc.x);
+                int const    ry = vx_round_to_int(tc.y);
+                int const    rz = vx_round_to_int(tc.z);
 
                 if (rx < scene_min.x)
                 {
@@ -233,13 +219,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             SDL_LogError(
                 SDL_LOG_CATEGORY_ERROR, "Scene has no valid instances with non-empty models");
             cvox_destroy_scene(scene);
-            SDL_free(buffer);
             return SDL_APP_FAILURE;
         }
 
-        int32_t const extent_x = scene_max.x - scene_min.x + 1;
-        int32_t const extent_y = scene_max.y - scene_min.y + 1;
-        int32_t const extent_z = scene_max.z - scene_min.z + 1;
+        int const extent_x = scene_max.x - scene_min.x + 1;
+        int const extent_y = scene_max.y - scene_min.y + 1;
+        int const extent_z = scene_max.z - scene_min.z + 1;
 
         if (extent_x <= 0 || extent_y <= 0 || extent_z <= 0)
         {
@@ -247,34 +232,30 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 SDL_LOG_CATEGORY_ERROR, "Invalid scene extents: %d x %d x %d", extent_x, extent_y,
                 extent_z);
             cvox_destroy_scene(scene);
-            SDL_free(buffer);
             return SDL_APP_FAILURE;
         }
 
-        int32_t const largest_extent = (extent_x > extent_y)
-                                           ? (extent_x > extent_z ? extent_x : extent_z)
-                                           : (extent_y > extent_z ? extent_y : extent_z);
+        int const largest_extent = (extent_x > extent_y)
+                                       ? (extent_x > extent_z ? extent_x : extent_z)
+                                       : (extent_y > extent_z ? extent_y : extent_z);
 
-        uint32_t const grid_size = next_power_of_2((uint32_t)largest_extent);
-        uint64_t const total_voxels = (uint64_t)grid_size * grid_size * grid_size;
-
-        if (total_voxels > 1024 * 1024 * 1024)
+        uint32_t const grid_ext = next_power_of_2((uint32_t)largest_extent);
+        if (grid_ext > 1024)
         {
             SDL_LogError(
-                SDL_LOG_CATEGORY_ERROR, "Requested voxel grid size is too large: %u^3", grid_size);
+                SDL_LOG_CATEGORY_ERROR, "Requested voxel grid size is too large: %u^3", grid_ext);
             cvox_destroy_scene(scene);
-            SDL_free(buffer);
             return SDL_APP_FAILURE;
         }
+        int const total_voxels = (int)grid_ext * grid_ext * grid_ext;
 
-        vx_buffer(uint8_t) const voxel_grid = calloc_vx_buffer(uint8_t, (int)total_voxels, 0);
+        vx_buffer(uint8_t) const voxel_grid = vx_buffer_calloc(uint8_t, total_voxels);
         if (voxel_grid.ptr == 0)
         {
             SDL_LogError(
                 SDL_LOG_CATEGORY_ERROR, "Failed to allocate memory for voxel grid of size %u^3",
-                grid_size);
+                grid_ext);
             cvox_destroy_scene(scene);
-            SDL_free(buffer);
             return SDL_APP_FAILURE;
         }
 
@@ -306,22 +287,21 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
                         if (voxel_val != 0)
                         {
-                            vx_vec3 const local_p = {(float)x, (float)y, (float)z};
-                            vx_vec3 const trans_p = vx_transform_point(&transform, local_p);
-                            int32_t const tx = vx_round_to_int(trans_p.x);
-                            int32_t const ty = vx_round_to_int(trans_p.y);
-                            int32_t const tz = vx_round_to_int(trans_p.z);
+                            float3 const local_p = {(float)x, (float)y, (float)z};
+                            float3 const trans_p = vx_transform_point(&transform, local_p);
+                            int const    tx = vx_round_to_int(trans_p.x);
+                            int const    ty = vx_round_to_int(trans_p.y);
+                            int const    tz = vx_round_to_int(trans_p.z);
 
-                            int32_t const dest_x = tx - scene_min.x;
-                            int32_t const dest_y = ty - scene_min.y;
-                            int32_t const dest_z = tz - scene_min.z;
+                            int const dest_x = tx - scene_min.x;
+                            int const dest_y = ty - scene_min.y;
+                            int const dest_z = tz - scene_min.z;
 
-                            if (dest_x >= 0 && dest_x < (int32_t)grid_size && dest_y >= 0 &&
-                                dest_y < (int32_t)grid_size && dest_z >= 0 &&
-                                dest_z < (int32_t)grid_size)
+                            if (dest_x >= 0 && dest_x < (int)grid_ext && dest_y >= 0 &&
+                                dest_y < (int)grid_ext && dest_z >= 0 && dest_z < (int)grid_ext)
                             {
-                                int32_t const dest_index =
-                                    vx_grid_index(dest_x, dest_y, dest_z, (int32_t)grid_size);
+                                int const dest_index =
+                                    vx_grid_index(dest_x, dest_y, dest_z, (int)grid_ext);
                                 voxel_grid.ptr[dest_index] = voxel_val;
                             }
                         }
@@ -332,9 +312,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
         (void)voxel_grid;
 
-        free_vx_buffer(voxel_grid);
+        vx_buffer_free(voxel_grid);
         cvox_destroy_scene(scene);
-        SDL_free(buffer);
     }
 
     // Init
