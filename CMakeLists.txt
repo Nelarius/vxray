@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vxray C CXX)
 
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,8 +13,9 @@ add_executable(shader-compiler ${CMAKE_CURRENT_SOURCE_DIR}/src/shader_compiler.c
 target_link_libraries(shader-compiler PRIVATE SDL3::SDL3-static SDL3_shadercross::SDL3_shadercross)
 
 set(VXRAY_SHADER_SOURCES
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/fullscreen.ps.hlsl
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/fullscreen.vs.hlsl)
+        dda.ps.hlsl
+        dda.vs.hlsl)
+list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 set(VXRAY_COMPILED_METAL_SHADERS_H ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.h)
 set(VXRAY_COMPILED_METAL_SHADERS_C ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.c)
@@ -41,8 +42,10 @@ set(VXRAY_SOURCES
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
         cvox.cc
         cvox.h
-        fullscreen.ps.hlsl
-        fullscreen.vs.hlsl
+        dda.h
+        dda.ps.hlsl
+        dda.vs.hlsl
+        hlsl_shim.h
         vxray.c)
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 

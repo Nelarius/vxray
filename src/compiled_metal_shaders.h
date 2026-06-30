@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-extern uint8_t const FULLSCREEN_PS_BYTES[];
-extern size_t const FULLSCREEN_PS_SIZE;
+extern uint8_t const DDA_PS_BYTES[];
+extern size_t const DDA_PS_SIZE;
 
-extern uint8_t const FULLSCREEN_VS_BYTES[];
-extern size_t const FULLSCREEN_VS_SIZE;
+extern uint8_t const DDA_VS_BYTES[];
+extern size_t const DDA_VS_SIZE;
