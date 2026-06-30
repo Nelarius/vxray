@@ -61,7 +61,7 @@ vx_buffer_decl(uint8_t);
 
 static uint32_t next_power_of_2(uint32_t x)
 {
-    // the method returns 0 for x = 0, which isn't a power of 2.
+    // NOTE: the method returns 0 for x = 0, which isn't a power of 2.
     assert(x > 0);
 
     --x;
@@ -118,32 +118,37 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     }
 
     {
-        char const* vox_file = argv[1];
-
-        SDL_PathInfo info;
-        if (!SDL_GetPathInfo(vox_file, &info))
+        cvox_scene const* scene = 0;
         {
-            SDL_LogError(SDL_LOG_CATEGORY_ERROR, "%s doesn't exist", vox_file);
-            return SDL_APP_FAILURE;
+            char const* vox_file = argv[1];
+
+            SDL_PathInfo info;
+            if (!SDL_GetPathInfo(vox_file, &info))
+            {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "%s doesn't exist", vox_file);
+                return SDL_APP_FAILURE;
+            }
+
+            size_t   num_bytes;
+            uint8_t* buffer = SDL_LoadFile(vox_file, &num_bytes);
+            if (!buffer || !num_bytes)
+            {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load %s", vox_file);
+                return SDL_APP_FAILURE;
+            }
+
+            scene = cvox_read_scene(buffer, num_bytes);
+
+            SDL_free(buffer);
         }
-
-        size_t   num_bytes;
-        uint8_t* buffer = SDL_LoadFile(vox_file, &num_bytes);
-        assert(buffer);
-
-        cvox_scene const* const scene = cvox_read_scene(buffer, num_bytes);
         if (scene == 0)
         {
-            SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Failed to load scene from %s", vox_file);
-            SDL_free(buffer);
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene from %s", argv[1]);
             return SDL_APP_FAILURE;
         }
-
-        SDL_free(buffer);
-
         if (scene->num_instances == 0 || scene->num_models == 0)
         {
-            SDL_LogError(SDL_LOG_CATEGORY_ERROR, "Scene has no instances or models");
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene has no instances or models");
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -152,7 +157,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
         bool has_valid_bounds = false;
 
-        for (uint32_t i = 0; i < scene->num_instances; ++i)
+        for (int i = 0; i < scene->num_instances; ++i)
         {
             cvox_instance const* const instance = &scene->instances[i];
             uint32_t const             model_index = cvox_sample_instance_model(instance, 0);
@@ -217,7 +222,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         if (!has_valid_bounds)
         {
             SDL_LogError(
-                SDL_LOG_CATEGORY_ERROR, "Scene has no valid instances with non-empty models");
+                SDL_LOG_CATEGORY_APPLICATION, "Scene has no valid instances with non-empty models");
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -229,8 +234,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         if (extent_x <= 0 || extent_y <= 0 || extent_z <= 0)
         {
             SDL_LogError(
-                SDL_LOG_CATEGORY_ERROR, "Invalid scene extents: %d x %d x %d", extent_x, extent_y,
-                extent_z);
+                SDL_LOG_CATEGORY_APPLICATION, "Invalid scene extents: %d x %d x %d", extent_x,
+                extent_y, extent_z);
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -243,7 +248,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         if (grid_ext > 1024)
         {
             SDL_LogError(
-                SDL_LOG_CATEGORY_ERROR, "Requested voxel grid size is too large: %u^3", grid_ext);
+                SDL_LOG_CATEGORY_APPLICATION, "Requested voxel grid size is too large: %u^3",
+                grid_ext);
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
