@@ -1,6 +1,6 @@
 #pragma once
 
-#if !defined(__HLSL_VERSION__)
+#if !defined(__HLSL_VERSION)
 
 #include <stdalign.h>
 #include <stdint.h>
