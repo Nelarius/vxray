@@ -176,16 +176,21 @@ static bool compile_shader(char const* const input_file, compiled_shader* const 
     }
 
 #if defined(SDL_PLATFORM_APPLE)
-    char const* const metal_command_prefix = "xcrun -sdk macosx";
+    char const* const metal_command = "xcrun -sdk macosx metal";
+    char const* const metallib_command = "xcrun -sdk macosx metallib";
+#elif defined(SDL_PLATFORM_WINDOWS)
+    char const* const metal_command = "metal.exe";
+    char const* const metallib_command = "metallib.exe";
 #else
-    char const* const metal_command_prefix = "";
+
+#error "Only Apple and Windows platforms are supported."
+
 #endif
 
     char command[MAX_COMMAND_LENGTH];
 
     snprintf(
-        command, sizeof(command), "%s metal -o \"%s\" -c \"%s\"", metal_command_prefix, air_path,
-        metal_path);
+        command, sizeof(command), "%s -o \"%s\" -c \"%s\"", metal_command, air_path, metal_path);
     if (!run_command(command))
     {
         fprintf(stderr, "Failed to compile generated MSL %s\n", metal_path);
@@ -193,8 +198,7 @@ static bool compile_shader(char const* const input_file, compiled_shader* const 
     }
 
     snprintf(
-        command, sizeof(command), "%s metallib \"%s\" -o \"%s\"", metal_command_prefix, air_path,
-        metallib_path);
+        command, sizeof(command), "%s \"%s\" -o \"%s\"", metallib_command, air_path, metallib_path);
     if (!run_command(command))
     {
         fprintf(stderr, "Failed to compile generated AIR %s\n", air_path);
