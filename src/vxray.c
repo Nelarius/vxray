@@ -90,44 +90,42 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
     if (!SDL_ClaimWindowForGPUDevice(vxray_instance.gpu_device, vxray_instance.window))
     {
-        SDL_LogError(
-            SDL_LOG_CATEGORY_GPU, "Couldn't claim window for GPU device: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't claim window for GPU device: %s",
+                     SDL_GetError());
         return SDL_APP_FAILURE;
     }
     vxray_instance.window_claimed = true;
-    if (!SDL_SetGPUSwapchainParameters(
-            vxray_instance.gpu_device, vxray_instance.window,
-            SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR, SDL_GPU_PRESENTMODE_VSYNC))
+    if (!SDL_SetGPUSwapchainParameters(vxray_instance.gpu_device, vxray_instance.window,
+                                       SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR,
+                                       SDL_GPU_PRESENTMODE_VSYNC))
     {
-        SDL_LogError(
-            SDL_LOG_CATEGORY_GPU, "Couldn't set GPU swapchain parameters: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't set GPU swapchain parameters: %s",
+                     SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
     // Graphics pipeline
 
     {
-        SDL_GPUShaderCreateInfo const vs_info = {
-            .code_size = FULLSCREEN_VS_SIZE,
-            .code = FULLSCREEN_VS_BYTES,
-            .entrypoint = GPU_SHADER_ENTRYPOINT,
-            .format = GPU_SHADER_FORMAT,
-            .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-            .num_samplers = 0,
-            .num_storage_textures = 0,
-            .num_storage_buffers = 0,
-            .num_uniform_buffers = 0};
-        SDL_GPUShaderCreateInfo const ps_info = {
-            .code_size = FULLSCREEN_PS_SIZE,
-            .code = FULLSCREEN_PS_BYTES,
-            .entrypoint = GPU_SHADER_ENTRYPOINT,
-            .format = GPU_SHADER_FORMAT,
-            .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-            .num_samplers = 0,
-            .num_storage_textures = 0,
-            .num_storage_buffers = 0,
-            .num_uniform_buffers = 0};
-        SDL_GPUShader* const vertex_shader =
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
+                                                 .code = FULLSCREEN_VS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                                 .num_samplers = 0,
+                                                 .num_storage_textures = 0,
+                                                 .num_storage_buffers = 0,
+                                                 .num_uniform_buffers = 0};
+        SDL_GPUShaderCreateInfo const ps_info = {.code_size = FULLSCREEN_PS_SIZE,
+                                                 .code = FULLSCREEN_PS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                 .num_samplers = 0,
+                                                 .num_storage_textures = 0,
+                                                 .num_storage_buffers = 0,
+                                                 .num_uniform_buffers = 0};
+        SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
         SDL_GPUShader* const fragment_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
@@ -138,8 +136,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
         if (!fragment_shader)
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_GPU, "Couldn't create fragment shader: %s", SDL_GetError());
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create fragment shader: %s",
+                         SDL_GetError());
             SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
             return SDL_APP_FAILURE;
         }
@@ -155,15 +153,15 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 .num_color_targets = 1,
                 .color_target_descriptions =
                     (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GetGPUSwapchainTextureFormat(
-                             vxray_instance.gpu_device, vxray_instance.window)}},
+                        {.format = SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device,
+                                                                    vxray_instance.window)}},
             }};
         SDL_GPUGraphicsPipeline* const pipeline =
             SDL_CreateGPUGraphicsPipeline(vxray_instance.gpu_device, &pipeline_info);
         if (!pipeline)
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_GPU, "Couldn't create GPU graphics pipeline: %s", SDL_GetError());
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create GPU graphics pipeline: %s",
+                         SDL_GetError());
             SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
             SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
             return SDL_APP_FAILURE;
@@ -199,20 +197,20 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPUCommandBuffer* const cmd_buffer = SDL_AcquireGPUCommandBuffer(gpu_device);
     if (!cmd_buffer)
     {
-        SDL_LogError(
-            SDL_LOG_CATEGORY_GPU, "Couldn't acquire GPU command buffer: %s\n", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't acquire GPU command buffer: %s\n",
+                     SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
     SDL_GPUTexture* swapchain_texture = 0;
     if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, window, &swapchain_texture, 0, 0))
     {
-        SDL_LogError(
-            SDL_LOG_CATEGORY_GPU, "Couldn't acquire GPU swapchain texture: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't acquire GPU swapchain texture: %s",
+                     SDL_GetError());
         if (!SDL_CancelGPUCommandBuffer(cmd_buffer))
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_GPU, "Couldn't cancel GPU command buffer: %s", SDL_GetError());
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't cancel GPU command buffer: %s",
+                         SDL_GetError());
         }
         return SDL_APP_FAILURE;
     }
@@ -221,18 +219,18 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     {
         if (!SDL_SubmitGPUCommandBuffer(cmd_buffer))
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_GPU, "Couldn't submit GPU command buffer: %s", SDL_GetError());
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't submit GPU command buffer: %s",
+                         SDL_GetError());
             return SDL_APP_FAILURE;
         }
         return SDL_APP_CONTINUE;
     }
 
-    SDL_GPUColorTargetInfo const color_target_info = {
-        .texture = swapchain_texture,
-        .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
-        .load_op = SDL_GPU_LOADOP_CLEAR,
-        .store_op = SDL_GPU_STOREOP_STORE};
+    SDL_GPUColorTargetInfo const color_target_info = {.texture = swapchain_texture,
+                                                      .clear_color =
+                                                          (SDL_FColor){0.f, 0.f, 0.f, 0.f},
+                                                      .load_op = SDL_GPU_LOADOP_CLEAR,
+                                                      .store_op = SDL_GPU_STOREOP_STORE};
     SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target_info, 1, 0);
     assert(render_pass);
 
@@ -241,8 +239,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_EndGPURenderPass(render_pass);
     if (!SDL_SubmitGPUCommandBuffer(cmd_buffer))
     {
-        SDL_LogError(
-            SDL_LOG_CATEGORY_GPU, "Couldn't submit GPU command buffer: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't submit GPU command buffer: %s",
+                     SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
