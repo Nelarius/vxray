@@ -154,71 +154,45 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
         int3 scene_min = {.x = INT32_MAX, .y = INT32_MAX, .z = INT32_MAX};
         int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
-        bool has_valid_bounds = false;
 
         for (int i = 0; i < scene->num_instances; ++i)
         {
             cvox_instance const* const instance = &scene->instances[i];
-            uint32_t const             model_index = cvox_sample_instance_model(instance, 0);
-            if (model_index >= scene->num_models || scene->models[model_index] == 0)
+            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
+            assert(model_idx < scene->num_models);
+
+            cvox_model const* const model = scene->models[model_idx];
+            assert(model);
+            if (model->size_x == 0 || model->size_y == 0 || model->size_z == 0)
             {
+                // NOTE: empty model -- does model->voxel_hash have a sentinel value we could look
+                // up?
                 continue;
             }
 
-            cvox_model const* const model = scene->models[model_index];
-            cvox_transform const    transform =
+            cvox_transform const transform =
                 cvox_sample_instance_transform_global(instance, 0, scene);
-
-            float const size_x_f = (float)model->size_x;
-            float const size_y_f = (float)model->size_y;
-            float const size_z_f = (float)model->size_z;
-
-            float const max_x = size_x_f > 0.0f ? (size_x_f - 1.0f) : 0.0f;
-            float const max_y = size_y_f > 0.0f ? (size_y_f - 1.0f) : 0.0f;
-            float const max_z = size_z_f > 0.0f ? (size_z_f - 1.0f) : 0.0f;
-
+            float const  max_x = (float)model->size_x - 1.f;
+            float const  max_y = (float)model->size_y - 1.f;
+            float const  max_z = (float)model->size_z - 1.f;
             float3 const corners[8] = {{0.f, 0.f, 0.f},     {max_x, 0.f, 0.f},
                                        {0.f, max_y, 0.f},   {0.f, 0.f, max_z},
                                        {max_x, max_y, 0.f}, {max_x, 0.f, max_z},
                                        {0.f, max_y, max_z}, {max_x, max_y, max_z}};
-
             for (int c = 0; c < 8; ++c)
             {
                 float3 const tc = vx_transform_point(&transform, corners[c]);
                 int const    rx = vx_round_to_int(tc.x);
                 int const    ry = vx_round_to_int(tc.y);
                 int const    rz = vx_round_to_int(tc.z);
-
-                if (rx < scene_min.x)
-                {
-                    scene_min.x = rx;
-                }
-                if (rx > scene_max.x)
-                {
-                    scene_max.x = rx;
-                }
-                if (ry < scene_min.y)
-                {
-                    scene_min.y = ry;
-                }
-                if (ry > scene_max.y)
-                {
-                    scene_max.y = ry;
-                }
-                if (rz < scene_min.z)
-                {
-                    scene_min.z = rz;
-                }
-                if (rz > scene_max.z)
-                {
-                    scene_max.z = rz;
-                }
+                scene_min = (int3){SDL_min(rx, scene_min.x), SDL_min(ry, scene_min.y),
+                                   SDL_min(rz, scene_min.z)};
+                scene_max = (int3){SDL_max(rx, scene_max.x), SDL_max(ry, scene_max.y),
+                                   SDL_max(rz, scene_max.z)};
             }
-
-            has_valid_bounds = true;
         }
 
-        if (!has_valid_bounds)
+        if (scene_min.x > scene_max.x || scene_min.y > scene_max.y || scene_min.z > scene_max.z)
         {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Scene has no valid instances with non-empty models");
@@ -226,24 +200,16 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
-        int const extent_x = scene_max.x - scene_min.x + 1;
-        int const extent_y = scene_max.y - scene_min.y + 1;
-        int const extent_z = scene_max.z - scene_min.z + 1;
-
-        if (extent_x <= 0 || extent_y <= 0 || extent_z <= 0)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Invalid scene extents: %d x %d x %d",
-                         extent_x, extent_y, extent_z);
-            cvox_destroy_scene(scene);
-            return SDL_APP_FAILURE;
-        }
-
-        int const largest_extent = (extent_x > extent_y)
-                                       ? (extent_x > extent_z ? extent_x : extent_z)
-                                       : (extent_y > extent_z ? extent_y : extent_z);
+        int const scene_ext_x = scene_max.x - scene_min.x + 1;
+        int const scene_ext_y = scene_max.y - scene_min.y + 1;
+        int const scene_ext_z = scene_max.z - scene_min.z + 1;
+        assert(scene_ext_x > 0);
+        assert(scene_ext_y > 0);
+        assert(scene_ext_z > 0);
+        int const largest_extent = SDL_max(scene_ext_x, SDL_max(scene_ext_y, scene_ext_z));
 
         uint32_t const grid_ext = next_power_of_2((uint32_t)largest_extent);
-        if (grid_ext > 1024)
+        if (grid_ext > 1024) // 1024 ^ 3 is (1 << 30)
         {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Requested voxel grid size is too large: %u^3", grid_ext);
@@ -253,13 +219,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         int const total_voxels = (int)grid_ext * grid_ext * grid_ext;
 
         vx_buffer(uint8_t) const voxel_grid = vx_buffer_calloc(uint8_t, total_voxels);
-        if (voxel_grid.ptr == 0)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_ERROR,
-                         "Failed to allocate memory for voxel grid of size %u^3", grid_ext);
-            cvox_destroy_scene(scene);
-            return SDL_APP_FAILURE;
-        }
+        assert(voxel_grid.ptr);
 
         for (uint32_t i = 0; i < scene->num_instances; ++i)
         {
