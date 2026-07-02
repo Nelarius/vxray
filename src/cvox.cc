@@ -31,17 +31,16 @@ extern "C" {
 
 void cvox_set_memory_allocator(cvox_alloc_func const alloc_func, cvox_free_func const free_func)
 {
-    ogt_vox_set_memory_allocator(
-        reinterpret_cast<ogt_vox_alloc_func>(alloc_func),
-        reinterpret_cast<ogt_vox_free_func>(free_func));
+    ogt_vox_set_memory_allocator(reinterpret_cast<ogt_vox_alloc_func>(alloc_func),
+                                 reinterpret_cast<ogt_vox_free_func>(free_func));
 }
 
 void* cvox_malloc(size_t const size) { return ogt_vox_malloc(size); }
 
 void cvox_free(void* const mem) { ogt_vox_free(mem); }
 
-void cvox_set_progress_callback_func(
-    cvox_progress_callback_func const progress_callback_func, void* const user_data)
+void cvox_set_progress_callback_func(cvox_progress_callback_func const progress_callback_func,
+                                     void* const                       user_data)
 {
     ogt_vox_set_progress_callback_func(
         reinterpret_cast<ogt_vox_progress_callback_func>(progress_callback_func), user_data);
@@ -55,9 +54,9 @@ cvox_transform cvox_transform_get_identity(void)
 
 cvox_transform cvox_transform_multiply(cvox_transform const* const a, cvox_transform const* const b)
 {
-    ogt_vox_transform const transform = ogt_vox_transform_multiply(
-        *reinterpret_cast<ogt_vox_transform const*>(a),
-        *reinterpret_cast<ogt_vox_transform const*>(b));
+    ogt_vox_transform const transform =
+        ogt_vox_transform_multiply(*reinterpret_cast<ogt_vox_transform const*>(a),
+                                   *reinterpret_cast<ogt_vox_transform const*>(b));
     return *reinterpret_cast<cvox_transform const*>(&transform);
 }
 
@@ -66,8 +65,8 @@ cvox_scene const* cvox_read_scene(uint8_t const* const buffer, uint32_t const bu
     return reinterpret_cast<cvox_scene const*>(ogt_vox_read_scene(buffer, buffer_size));
 }
 
-cvox_scene const* cvox_read_scene_with_flags(
-    uint8_t const* const buffer, uint32_t const buffer_size, uint32_t const read_flags)
+cvox_scene const* cvox_read_scene_with_flags(uint8_t const* const buffer,
+                                             uint32_t const buffer_size, uint32_t const read_flags)
 {
     return reinterpret_cast<cvox_scene const*>(
         ogt_vox_read_scene_with_flags(buffer, buffer_size, read_flags));
@@ -85,14 +84,13 @@ uint8_t* cvox_write_scene(cvox_scene const* const scene, uint32_t* const buffer_
 
 void cvox_camera_to_transform(cvox_cam const* const camera, cvox_transform* const transform)
 {
-    ogt_vox_camera_to_transform(
-        reinterpret_cast<ogt_vox_cam const*>(camera),
-        reinterpret_cast<ogt_vox_transform*>(transform));
+    ogt_vox_camera_to_transform(reinterpret_cast<ogt_vox_cam const*>(camera),
+                                reinterpret_cast<ogt_vox_transform*>(transform));
 }
 
-cvox_scene* cvox_merge_scenes(
-    cvox_scene const** const scenes, uint32_t const scene_count,
-    cvox_rgba const* const required_colors, uint32_t const required_color_count)
+cvox_scene* cvox_merge_scenes(cvox_scene const** const scenes, uint32_t const scene_count,
+                              cvox_rgba const* const required_colors,
+                              uint32_t const         required_color_count)
 {
     return reinterpret_cast<cvox_scene*>(ogt_vox_merge_scenes(
         reinterpret_cast<ogt_vox_scene const**>(scenes), scene_count,
@@ -101,12 +99,13 @@ cvox_scene* cvox_merge_scenes(
 
 uint32_t cvox_sample_instance_model(cvox_instance const* const instance, uint32_t const frame_index)
 {
-    return ogt_vox_sample_instance_model(
-        reinterpret_cast<ogt_vox_instance const*>(instance), frame_index);
+    return ogt_vox_sample_instance_model(reinterpret_cast<ogt_vox_instance const*>(instance),
+                                         frame_index);
 }
 
-cvox_transform cvox_sample_instance_transform_global(
-    cvox_instance const* const instance, uint32_t const frame_index, cvox_scene const* const scene)
+cvox_transform cvox_sample_instance_transform_global(cvox_instance const* const instance,
+                                                     uint32_t const             frame_index,
+                                                     cvox_scene const* const    scene)
 {
     ogt_vox_transform const transform = ogt_vox_sample_instance_transform_global(
         reinterpret_cast<ogt_vox_instance const*>(instance), frame_index,
@@ -114,16 +113,17 @@ cvox_transform cvox_sample_instance_transform_global(
     return *reinterpret_cast<cvox_transform const*>(&transform);
 }
 
-cvox_transform cvox_sample_instance_transform_local(
-    cvox_instance const* const instance, uint32_t const frame_index)
+cvox_transform cvox_sample_instance_transform_local(cvox_instance const* const instance,
+                                                    uint32_t const             frame_index)
 {
     ogt_vox_transform const transform = ogt_vox_sample_instance_transform_local(
         reinterpret_cast<ogt_vox_instance const*>(instance), frame_index);
     return *reinterpret_cast<cvox_transform const*>(&transform);
 }
 
-cvox_transform cvox_sample_group_transform_global(
-    cvox_group const* const group, uint32_t const frame_index, cvox_scene const* const scene)
+cvox_transform cvox_sample_group_transform_global(cvox_group const* const group,
+                                                  uint32_t const          frame_index,
+                                                  cvox_scene const* const scene)
 {
     ogt_vox_transform const transform = ogt_vox_sample_group_transform_global(
         reinterpret_cast<ogt_vox_group const*>(group), frame_index,
@@ -131,8 +131,8 @@ cvox_transform cvox_sample_group_transform_global(
     return *reinterpret_cast<cvox_transform const*>(&transform);
 }
 
-cvox_transform
-cvox_sample_group_transform_local(cvox_group const* const group, uint32_t const frame_index)
+cvox_transform cvox_sample_group_transform_local(cvox_group const* const group,
+                                                 uint32_t const          frame_index)
 {
     ogt_vox_transform const transform = ogt_vox_sample_group_transform_local(
         reinterpret_cast<ogt_vox_group const*>(group), frame_index);

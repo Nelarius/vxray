@@ -77,10 +77,9 @@ static uint32_t next_power_of_2(uint32_t x)
 
 static float3 vx_transform_point(cvox_transform const* const t, float3 const p)
 {
-    float3 const result = {
-        .x = t->m30 + (t->m00 * p.x) + (t->m10 * p.y) + (t->m20 * p.z),
-        .y = t->m31 + (t->m01 * p.x) + (t->m11 * p.y) + (t->m21 * p.z),
-        .z = t->m32 + (t->m02 * p.x) + (t->m12 * p.y) + (t->m22 * p.z)};
+    float3 const result = {.x = t->m30 + (t->m00 * p.x) + (t->m10 * p.y) + (t->m20 * p.z),
+                           .y = t->m31 + (t->m01 * p.x) + (t->m11 * p.y) + (t->m21 * p.z),
+                           .z = t->m32 + (t->m02 * p.x) + (t->m12 * p.y) + (t->m22 * p.z)};
     return result;
 }
 
@@ -221,8 +220,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
         if (!has_valid_bounds)
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_APPLICATION, "Scene has no valid instances with non-empty models");
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Scene has no valid instances with non-empty models");
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -233,9 +232,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
         if (extent_x <= 0 || extent_y <= 0 || extent_z <= 0)
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_APPLICATION, "Invalid scene extents: %d x %d x %d", extent_x,
-                extent_y, extent_z);
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Invalid scene extents: %d x %d x %d",
+                         extent_x, extent_y, extent_z);
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -247,9 +245,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         uint32_t const grid_ext = next_power_of_2((uint32_t)largest_extent);
         if (grid_ext > 1024)
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_APPLICATION, "Requested voxel grid size is too large: %u^3",
-                grid_ext);
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Requested voxel grid size is too large: %u^3", grid_ext);
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -258,9 +255,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         vx_buffer(uint8_t) const voxel_grid = vx_buffer_calloc(uint8_t, total_voxels);
         if (voxel_grid.ptr == 0)
         {
-            SDL_LogError(
-                SDL_LOG_CATEGORY_ERROR, "Failed to allocate memory for voxel grid of size %u^3",
-                grid_ext);
+            SDL_LogError(SDL_LOG_CATEGORY_ERROR,
+                         "Failed to allocate memory for voxel grid of size %u^3", grid_ext);
             cvox_destroy_scene(scene);
             return SDL_APP_FAILURE;
         }
@@ -378,27 +374,25 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     // Graphics pipeline
 
     {
-        SDL_GPUShaderCreateInfo const vs_info = {
-            .code_size = DDA_VS_SIZE,
-            .code = DDA_VS_BYTES,
-            .entrypoint = GPU_SHADER_ENTRYPOINT,
-            .format = GPU_SHADER_FORMAT,
-            .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-            .num_samplers = 0,
-            .num_storage_textures = 0,
-            .num_storage_buffers = 0,
-            .num_uniform_buffers = 0};
-        SDL_GPUShaderCreateInfo const ps_info = {
-            .code_size = DDA_PS_SIZE,
-            .code = DDA_PS_BYTES,
-            .entrypoint = GPU_SHADER_ENTRYPOINT,
-            .format = GPU_SHADER_FORMAT,
-            .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-            .num_samplers = 0,
-            .num_storage_textures = 0,
-            .num_storage_buffers = 0,
-            .num_uniform_buffers = 0};
-        SDL_GPUShader* const vertex_shader =
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = DDA_VS_SIZE,
+                                                 .code = DDA_VS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
+                                                 .num_samplers = 0,
+                                                 .num_storage_textures = 0,
+                                                 .num_storage_buffers = 0,
+                                                 .num_uniform_buffers = 0};
+        SDL_GPUShaderCreateInfo const ps_info = {.code_size = DDA_PS_SIZE,
+                                                 .code = DDA_PS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                 .num_samplers = 0,
+                                                 .num_storage_textures = 0,
+                                                 .num_storage_buffers = 0,
+                                                 .num_uniform_buffers = 0};
+        SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
         SDL_GPUShader* const fragment_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);

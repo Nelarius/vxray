@@ -230,28 +230,27 @@ enum
 void  cvox_set_memory_allocator(cvox_alloc_func alloc_func, cvox_free_func free_func);
 void* cvox_malloc(size_t size);
 void  cvox_free(void* mem);
-void  cvox_set_progress_callback_func(
-     cvox_progress_callback_func progress_callback_func, void* user_data);
+void  cvox_set_progress_callback_func(cvox_progress_callback_func progress_callback_func,
+                                      void*                       user_data);
 
 cvox_transform cvox_transform_get_identity(void);
 cvox_transform cvox_transform_multiply(cvox_transform const* a, cvox_transform const* b);
 
 cvox_scene const* cvox_read_scene(uint8_t const* buffer, uint32_t buffer_size);
-cvox_scene const*
-     cvox_read_scene_with_flags(uint8_t const* buffer, uint32_t buffer_size, uint32_t read_flags);
-void cvox_destroy_scene(cvox_scene const* scene);
-uint8_t*    cvox_write_scene(cvox_scene const* scene, uint32_t* buffer_size);
-void        cvox_camera_to_transform(cvox_cam const* camera, cvox_transform* transform);
-cvox_scene* cvox_merge_scenes(
-    cvox_scene const** scenes, uint32_t scene_count, cvox_rgba const* required_colors,
-    uint32_t required_color_count);
+cvox_scene const* cvox_read_scene_with_flags(uint8_t const* buffer, uint32_t buffer_size,
+                                             uint32_t read_flags);
+void              cvox_destroy_scene(cvox_scene const* scene);
+uint8_t*          cvox_write_scene(cvox_scene const* scene, uint32_t* buffer_size);
+void              cvox_camera_to_transform(cvox_cam const* camera, cvox_transform* transform);
+cvox_scene*    cvox_merge_scenes(cvox_scene const** scenes, uint32_t scene_count,
+                                 cvox_rgba const* required_colors, uint32_t required_color_count);
 uint32_t       cvox_sample_instance_model(cvox_instance const* instance, uint32_t frame_index);
-cvox_transform cvox_sample_instance_transform_global(
-    cvox_instance const* instance, uint32_t frame_index, cvox_scene const* scene);
-cvox_transform
-cvox_sample_instance_transform_local(cvox_instance const* instance, uint32_t frame_index);
-cvox_transform cvox_sample_group_transform_global(
-    cvox_group const* group, uint32_t frame_index, cvox_scene const* scene);
+cvox_transform cvox_sample_instance_transform_global(cvox_instance const* instance,
+                                                     uint32_t frame_index, cvox_scene const* scene);
+cvox_transform cvox_sample_instance_transform_local(cvox_instance const* instance,
+                                                    uint32_t             frame_index);
+cvox_transform cvox_sample_group_transform_global(cvox_group const* group, uint32_t frame_index,
+                                                  cvox_scene const* scene);
 cvox_transform cvox_sample_group_transform_local(cvox_group const* group, uint32_t frame_index);
 
 #ifdef __cplusplus
