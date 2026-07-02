@@ -51,4 +51,8 @@ list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 add_executable(vxray ${VXRAY_SOURCES})
 target_link_libraries(vxray PRIVATE ogt SDL3::SDL3-static)
+target_compile_options(
+        vxray
+        PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fno-exceptions>
+                $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/EHsc->)
 add_dependencies(vxray compile-vxray-shaders)
