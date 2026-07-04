@@ -1,16 +1,30 @@
+#include "cvox.h"
+#include "dda.h"
+#include "hlsl_shim.h"
+
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_init.h>
+#include <SDL3/SDL_iostream.h>
+#include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_platform_defines.h>
+#include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
 
 #include <assert.h>
+#include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #if defined(SDL_PLATFORM_APPLE)
 
@@ -34,13 +48,243 @@
 
 #endif
 
+#define vx_buffer_decl(T)                                                                          \
+    typedef struct vx_##T##_buffer                                                                 \
+    {                                                                                              \
+        T*  ptr;                                                                                   \
+        int count;                                                                                 \
+    } vx_##T##_buffer
+
+#define vx_buffer(T) vx_##T##_buffer
+
+#define vx_buffer_calloc(T, N)                                                                     \
+    (vx_##T##_buffer) { .ptr = calloc((N), sizeof(T)), .count = (N) }
+
+#define vx_buffer_free(b) free((b).ptr)
+
+vx_buffer_decl(uint32_t);
+
+static uint32_t vx_next_power_of_2(uint32_t x)
+{
+    // NOTE: the method returns 0 for x = 0, which isn't a power of 2.
+    assert(x > 0);
+
+    --x;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    ++x;
+
+    return x;
+}
+
+static float3 vx_transform_point(cvox_transform const* const t, float3 const p)
+{
+    float3 const q = {.x = t->m30 + (t->m00 * p.x) + (t->m10 * p.y) + (t->m20 * p.z),
+                      .y = t->m31 + (t->m01 * p.x) + (t->m11 * p.y) + (t->m21 * p.z),
+                      .z = t->m32 + (t->m02 * p.x) + (t->m12 * p.y) + (t->m22 * p.z)};
+    // Magicavoxel seems to use z-up. Flip to y-up.
+    return float3(q.x, q.z, q.y);
+}
+
+static int vx_round_to_int(float const val)
+{
+    return (int)(val >= 0.f ? (val + 0.5f) : (val - 0.5f));
+}
+
+static int vx_grid_index(int const x, int const y, int const z, int const grid_ext)
+{
+    return x + (y * grid_ext) + (z * grid_ext * grid_ext);
+}
+
+static float3 vx_float3_add(float3 const a, float3 const b)
+{
+    return float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+static float3 vx_float3_sub(float3 const a, float3 const b)
+{
+    return float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+static float3 vx_float3_scale(float3 const v, float const s)
+{
+    return float3(v.x * s, v.y * s, v.z * s);
+}
+
+static float vx_float3_dot(float3 const a, float3 const b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static float3 vx_float3_cross(float3 const a, float3 const b)
+{
+    return float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+static float vx_float3_norm(float3 const v) { return sqrtf(vx_float3_dot(v, v)); }
+
+static float3 vx_float3_normalize(float3 const v)
+{
+    float const norm = vx_float3_norm(v);
+    if (norm <= 0.f)
+    {
+        return float3(0.f, 0.f, 0.f);
+    }
+
+    return vx_float3_scale(v, 1.f / norm);
+}
+
+static float4 vx_float4_from_float3(float3 const v, float const w)
+{
+    return float4(v.x, v.y, v.z, w);
+}
+
+static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* const buffer,
+                                 void const* const data, uint32_t const size)
+{
+    SDL_GPUTransferBuffer* const transfer = SDL_CreateGPUTransferBuffer(
+        device, &(SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                                                   .size = size});
+    if (!transfer)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create GPU transfer buffer: %s",
+                     SDL_GetError());
+        return false;
+    }
+
+    void* const mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    if (!mapped)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map GPU transfer buffer: %s", SDL_GetError());
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+    SDL_memcpy(mapped, data, size);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+
+    SDL_GPUCommandBuffer* const cmd = SDL_AcquireGPUCommandBuffer(device);
+    if (!cmd)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire GPU command buffer: %s",
+                     SDL_GetError());
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+
+    SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd);
+    if (!copy_pass)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to begin GPU copy pass: %s", SDL_GetError());
+        SDL_CancelGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+
+    SDL_UploadToGPUBuffer(
+        copy_pass, &(SDL_GPUTransferBufferLocation){.transfer_buffer = transfer, .offset = 0},
+        &(SDL_GPUBufferRegion){.buffer = buffer, .offset = 0, .size = size}, false);
+    SDL_EndGPUCopyPass(copy_pass);
+
+    bool const submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    if (!submitted)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to submit GPU upload command buffer: %s",
+                     SDL_GetError());
+        return false;
+    }
+
+    return true;
+}
+
+typedef struct vx_camera
+{
+    float3 position;
+    float  yaw;
+    float  pitch;
+    bool   mouse_dragging;
+} vx_camera;
+
+static void vx_camera_basis(vx_camera const* const camera, float3* const right, float3* const up,
+                            float3* const forward)
+{
+    float const cos_pitch = cosf(camera->pitch);
+    *forward = vx_float3_normalize(
+        float3(sinf(camera->yaw) * cos_pitch, sinf(camera->pitch), cosf(camera->yaw) * cos_pitch));
+
+    float3 const world_up = float3(0.f, 1.f, 0.f);
+    *right = vx_float3_normalize(vx_float3_cross(*forward, world_up));
+    *up = vx_float3_cross(*right, *forward);
+}
+
+static void vx_camera_look_at(vx_camera* const camera, float3 const target)
+{
+    float3 const forward = vx_float3_normalize(vx_float3_sub(target, camera->position));
+    camera->pitch = asinf(SDL_clamp(forward.y, -1.f, 1.f));
+    camera->yaw = atan2f(forward.x, forward.z);
+}
+
+static void vx_camera_update_movement(vx_camera* const camera)
+{
+    float3 right = {0};
+    float3 up = {0};
+    float3 forward = {0};
+    vx_camera_basis(camera, &right, &up, &forward);
+
+    bool const* const keys = SDL_GetKeyboardState(0);
+    float const       move_speed = 1.0f;
+    float3            move = {0};
+    if (keys[SDL_SCANCODE_W])
+    {
+        move = vx_float3_add(move, forward);
+    }
+    if (keys[SDL_SCANCODE_S])
+    {
+        move = vx_float3_sub(move, forward);
+    }
+    if (keys[SDL_SCANCODE_D])
+    {
+        move = vx_float3_add(move, right);
+    }
+    if (keys[SDL_SCANCODE_A])
+    {
+        move = vx_float3_sub(move, right);
+    }
+    if (keys[SDL_SCANCODE_E])
+    {
+        move = vx_float3_add(move, up);
+    }
+    if (keys[SDL_SCANCODE_Q])
+    {
+        move = vx_float3_sub(move, up);
+    }
+    if (vx_float3_norm(move) > 0.f)
+    {
+        camera->position =
+            vx_float3_add(camera->position, vx_float3_scale(vx_float3_normalize(move), move_speed));
+    }
+}
+
 typedef struct vxray
 {
-    SDL_GPUDevice*           gpu_device;
-    SDL_Window*              window;
-    SDL_GPUGraphicsPipeline* pipeline;
+    // Platform
+    SDL_GPUDevice* gpu_device;
+    SDL_Window*    window;
+    bool           window_claimed;
 
-    bool window_claimed;
+    // Camera
+    vx_camera camera;
+
+    // Voxel grid
+    int grid_ext;
+
+    // GPU
+    SDL_GPUGraphicsPipeline* pipeline;
+    SDL_GPUBuffer*           voxel_buffer;
+    SDL_GPUBuffer*           palette_buffer;
 } vxray;
 
 static vxray vxray_instance = {0};
@@ -48,8 +292,12 @@ static vxray vxray_instance = {0};
 SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
-    (void)argc;
-    (void)argv;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: %s <file.vox>\n", argv[0]);
+        return SDL_APP_FAILURE;
+    }
 
     // Init
 
@@ -107,8 +355,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     // Graphics pipeline
 
     {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
-                                                 .code = FULLSCREEN_VS_BYTES,
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = DDA_VS_SIZE,
+                                                 .code = DDA_VS_BYTES,
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX,
@@ -116,15 +364,15 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .num_storage_textures = 0,
                                                  .num_storage_buffers = 0,
                                                  .num_uniform_buffers = 0};
-        SDL_GPUShaderCreateInfo const ps_info = {.code_size = FULLSCREEN_PS_SIZE,
-                                                 .code = FULLSCREEN_PS_BYTES,
+        SDL_GPUShaderCreateInfo const ps_info = {.code_size = DDA_PS_SIZE,
+                                                 .code = DDA_PS_BYTES,
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 0,
                                                  .num_storage_textures = 0,
-                                                 .num_storage_buffers = 0,
-                                                 .num_uniform_buffers = 0};
+                                                 .num_storage_buffers = 2,
+                                                 .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
         SDL_GPUShader* const fragment_shader =
@@ -172,6 +420,230 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
     }
 
+    {
+        cvox_scene const* scene = 0;
+        {
+            char const* vox_file = argv[1];
+
+            SDL_PathInfo info;
+            if (!SDL_GetPathInfo(vox_file, &info))
+            {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "%s doesn't exist", vox_file);
+                return SDL_APP_FAILURE;
+            }
+
+            size_t   num_bytes;
+            uint8_t* buffer = SDL_LoadFile(vox_file, &num_bytes);
+            if (!buffer || !num_bytes)
+            {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load %s", vox_file);
+                return SDL_APP_FAILURE;
+            }
+
+            scene = cvox_read_scene(buffer, num_bytes);
+
+            SDL_free(buffer);
+        }
+        if (scene == 0)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene from %s", argv[1]);
+            return SDL_APP_FAILURE;
+        }
+        if (scene->num_instances == 0 || scene->num_models == 0)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene has no instances or models");
+            cvox_destroy_scene(scene);
+            return SDL_APP_FAILURE;
+        }
+
+        int3 scene_min = {.x = INT32_MAX, .y = INT32_MAX, .z = INT32_MAX};
+        int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
+
+        for (int i = 0; i < scene->num_instances; ++i)
+        {
+            cvox_instance const* const instance = &scene->instances[i];
+            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
+            assert(model_idx < scene->num_models);
+
+            cvox_model const* const model = scene->models[model_idx];
+            assert(model);
+            if (model->size_x == 0 || model->size_y == 0 || model->size_z == 0)
+            {
+                // NOTE: empty model -- does model->voxel_hash have a sentinel value we could look
+                // up?
+                continue;
+            }
+
+            cvox_transform const transform =
+                cvox_sample_instance_transform_global(instance, 0, scene);
+            int3 const   pivot = {.x = (int)(model->size_x / 2),
+                                  .y = (int)(model->size_y / 2),
+                                  .z = (int)(model->size_z / 2)};
+            float const  min_x = (float)-pivot.x;
+            float const  min_y = (float)-pivot.y;
+            float const  min_z = (float)-pivot.z;
+            float const  max_x = (float)((int)model->size_x - 1 - pivot.x);
+            float const  max_y = (float)((int)model->size_y - 1 - pivot.y);
+            float const  max_z = (float)((int)model->size_z - 1 - pivot.z);
+            float3 const corners[8] = {{min_x, min_y, min_z}, {max_x, min_y, min_z},
+                                       {min_x, max_y, min_z}, {min_x, min_y, max_z},
+                                       {max_x, max_y, min_z}, {max_x, min_y, max_z},
+                                       {min_x, max_y, max_z}, {max_x, max_y, max_z}};
+            for (int c = 0; c < 8; ++c)
+            {
+                float3 const tc = vx_transform_point(&transform, corners[c]);
+                int const    rx = vx_round_to_int(tc.x);
+                int const    ry = vx_round_to_int(tc.y);
+                int const    rz = vx_round_to_int(tc.z);
+                scene_min = (int3){SDL_min(rx, scene_min.x), SDL_min(ry, scene_min.y),
+                                   SDL_min(rz, scene_min.z)};
+                scene_max = (int3){SDL_max(rx, scene_max.x), SDL_max(ry, scene_max.y),
+                                   SDL_max(rz, scene_max.z)};
+            }
+        }
+
+        if (scene_min.x > scene_max.x || scene_min.y > scene_max.y || scene_min.z > scene_max.z)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Scene has no valid instances with non-empty models");
+            cvox_destroy_scene(scene);
+            return SDL_APP_FAILURE;
+        }
+
+        int const scene_ext_x = scene_max.x - scene_min.x + 1;
+        int const scene_ext_y = scene_max.y - scene_min.y + 1;
+        int const scene_ext_z = scene_max.z - scene_min.z + 1;
+        assert(scene_ext_x > 0);
+        assert(scene_ext_y > 0);
+        assert(scene_ext_z > 0);
+        int const largest_extent = SDL_max(scene_ext_x, SDL_max(scene_ext_y, scene_ext_z));
+        if (largest_extent > 1024) // NOTE: 1024^ 3 is (1 << 30)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene extent is too large: %d",
+                         largest_extent);
+            cvox_destroy_scene(scene);
+            return SDL_APP_FAILURE;
+        }
+
+        int const grid_ext = (int)vx_next_power_of_2((uint32_t)largest_extent);
+        int const total_voxels = grid_ext * grid_ext * grid_ext;
+        vx_buffer(uint32_t) voxel_grid = vx_buffer_calloc(uint32_t, total_voxels);
+        assert(voxel_grid.ptr);
+        vxray_instance.grid_ext = grid_ext;
+        cvox_palette const palette = scene->palette;
+
+        for (int i = 0; i < (int)scene->num_instances; ++i)
+        {
+            cvox_instance const* const instance = &scene->instances[i];
+            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
+
+            cvox_model const* const model = scene->models[model_idx];
+            assert(model);
+
+            cvox_transform const transform =
+                cvox_sample_instance_transform_global(instance, 0, scene);
+
+            int const  sx = (int)model->size_x;
+            int const  sy = (int)model->size_y;
+            int const  sz = (int)model->size_z;
+            int3 const pivot = {.x = (int)(model->size_x / 2),
+                                .y = (int)(model->size_y / 2),
+                                .z = (int)(model->size_z / 2)};
+            for (int z = 0; z < sz; ++z)
+            {
+                for (int y = 0; y < sy; ++y)
+                {
+                    for (int x = 0; x < sx; ++x)
+                    {
+                        int const     src_idx = x + y * sx + z * sx * sy;
+                        uint8_t const voxel = model->voxel_data[src_idx];
+                        if (voxel)
+                        {
+                            float3 const local_coord = {.x = (float)(x - pivot.x),
+                                                        .y = (float)(y - pivot.y),
+                                                        .z = (float)(z - pivot.z)};
+                            float3 const global_coord = vx_transform_point(&transform, local_coord);
+
+                            int const gx = vx_round_to_int(global_coord.x);
+                            int const gy = vx_round_to_int(global_coord.y);
+                            int const gz = vx_round_to_int(global_coord.z);
+                            int const dx = gx - scene_min.x;
+                            int const dy = gy - scene_min.y;
+                            int const dz = gz - scene_min.z;
+                            assert(dx >= 0 && dx < grid_ext);
+                            assert(dy >= 0 && dy < grid_ext);
+                            assert(dz >= 0 && dz < grid_ext);
+
+                            int const dest_idx = dx + dy * grid_ext + dz * grid_ext * grid_ext;
+                            assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
+                            voxel_grid.ptr[dest_idx] = (uint32_t)voxel;
+                        }
+                    }
+                }
+            }
+        }
+        cvox_destroy_scene(scene);
+
+        {
+            SDL_GPUDevice* const device = vxray_instance.gpu_device;
+
+            {
+                uint32_t const voxel_buffer_size =
+                    (uint32_t)((size_t)voxel_grid.count * sizeof(uint32_t));
+                SDL_GPUBuffer* const voxel_buffer = SDL_CreateGPUBuffer(
+                    device,
+                    &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                                               .size = voxel_buffer_size});
+                if (!voxel_buffer)
+                {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel buffer: %s",
+                                 SDL_GetError());
+                    vx_buffer_free(voxel_grid);
+                    return SDL_APP_FAILURE;
+                }
+                if (!vx_gpu_buffer_upload(device, voxel_buffer, voxel_grid.ptr, voxel_buffer_size))
+                {
+                    SDL_ReleaseGPUBuffer(device, voxel_buffer);
+                    vx_buffer_free(voxel_grid);
+                    return SDL_APP_FAILURE;
+                }
+                vxray_instance.voxel_buffer = voxel_buffer;
+            }
+            {
+                uint32_t const palette_size = 4 * 256;
+                assert(palette_size == sizeof(palette));
+                SDL_GPUBuffer* const palette_buffer = SDL_CreateGPUBuffer(
+                    device,
+                    &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                                               .size = palette_size});
+                if (!palette_buffer)
+                {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create palette buffer: %s",
+                                 SDL_GetError());
+                    vx_buffer_free(voxel_grid);
+                    return SDL_APP_FAILURE;
+                }
+                if (!vx_gpu_buffer_upload(device, palette_buffer, palette.color, palette_size))
+                {
+                    SDL_ReleaseGPUBuffer(device, palette_buffer);
+                    vx_buffer_free(voxel_grid);
+                    return SDL_APP_FAILURE;
+                }
+
+                vxray_instance.palette_buffer = palette_buffer;
+            }
+
+            vx_buffer_free(voxel_grid);
+        }
+
+        float const  view_radius = 0.5f * (float)grid_ext;
+        float3 const scene_center =
+            float3(0.5f * (float)scene_ext_x, 0.5f * (float)scene_ext_y, 0.5f * (float)scene_ext_z);
+        vxray_instance.camera.position =
+            vx_float3_add(scene_center, float3(0.f, view_radius * 0.3f, -view_radius * 2.8f));
+        vx_camera_look_at(&vxray_instance.camera, scene_center);
+    }
+
     return SDL_APP_CONTINUE;
 }
 
@@ -183,6 +655,33 @@ SDL_AppResult SDL_AppEvent(void* const appstate, SDL_Event* const event)
     {
         return SDL_APP_SUCCESS;
     }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && event->button.button == SDL_BUTTON_LEFT)
+    {
+        vxray_instance.camera.mouse_dragging = true;
+        if (!SDL_SetWindowRelativeMouseMode(vxray_instance.window, true))
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't enable relative mouse mode: %s",
+                        SDL_GetError());
+        }
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP && event->button.button == SDL_BUTTON_LEFT)
+    {
+        vxray_instance.camera.mouse_dragging = false;
+        if (!SDL_SetWindowRelativeMouseMode(vxray_instance.window, false))
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't disable relative mouse mode: %s",
+                        SDL_GetError());
+        }
+    }
+    if (event->type == SDL_EVENT_MOUSE_MOTION && vxray_instance.camera.mouse_dragging)
+    {
+        vx_camera* const camera = &vxray_instance.camera;
+        float const      mouse_sensitivity = 0.003f;
+        float const      pitch_limit = 1.55334306f;
+        camera->yaw += (float)event->motion.xrel * mouse_sensitivity;
+        camera->pitch = SDL_clamp(camera->pitch - (float)event->motion.yrel * mouse_sensitivity,
+                                  -pitch_limit, pitch_limit);
+    }
 
     return SDL_APP_CONTINUE;
 }
@@ -193,6 +692,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
 
     SDL_GPUDevice* const gpu_device = vxray_instance.gpu_device;
     SDL_Window* const    window = vxray_instance.window;
+    vx_camera* const     camera = &vxray_instance.camera;
+    vx_camera_update_movement(camera);
 
     SDL_GPUCommandBuffer* const cmd_buffer = SDL_AcquireGPUCommandBuffer(gpu_device);
     if (!cmd_buffer)
@@ -203,7 +704,9 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     }
 
     SDL_GPUTexture* swapchain_texture = 0;
-    if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, window, &swapchain_texture, 0, 0))
+    uint32_t        width, height;
+    if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, window, &swapchain_texture, &width,
+                                               &height))
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't acquire GPU swapchain texture: %s",
                      SDL_GetError());
@@ -235,6 +738,21 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(render_pass);
 
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.pipeline);
+    SDL_BindGPUFragmentStorageBuffers(
+        render_pass, 0,
+        (SDL_GPUBuffer*[]){vxray_instance.voxel_buffer, vxray_instance.palette_buffer}, 2);
+
+    float3 right = {0};
+    float3 up = {0};
+    float3 forward = {0};
+    vx_camera_basis(camera, &right, &up, &forward);
+    dda_uniforms const uniforms = {.camera_pos = vx_float4_from_float3(camera->position, 0.f),
+                                   .camera_right = vx_float4_from_float3(right, 0.f),
+                                   .camera_up = vx_float4_from_float3(up, 0.f),
+                                   .camera_forward = vx_float4_from_float3(forward, 0.f),
+                                   .viewport = {(float)width, (float)height, 60.f, 0.f},
+                                   .grid_ext = vxray_instance.grid_ext};
+    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &uniforms, sizeof(dda_uniforms));
     SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
     SDL_EndGPURenderPass(render_pass);
     if (!SDL_SubmitGPUCommandBuffer(cmd_buffer))
@@ -252,9 +770,22 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     (void)appstate;
     (void)result;
 
+    if (vxray_instance.palette_buffer)
+    {
+        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.palette_buffer);
+        vxray_instance.palette_buffer = 0;
+    }
+
+    if (vxray_instance.voxel_buffer)
+    {
+        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.voxel_buffer);
+        vxray_instance.voxel_buffer = 0;
+    }
+
     if (vxray_instance.pipeline)
     {
         SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.pipeline);
+        vxray_instance.pipeline = 0;
     }
 
     if (vxray_instance.window_claimed)

@@ -19,3 +19,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug
 ```sh
 cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER= ccache -DCMAKE_BUILD_TYPE=Debug
 ```
+
+## References
+
+- _Ray Axis-Aligned Bounding Box Intersection_, [Ray Tracing Gems II](https://developer.nvidia.com/ray-tracing-gems-ii)
