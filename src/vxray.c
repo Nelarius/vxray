@@ -208,6 +208,17 @@ typedef struct vx_camera
     bool   mouse_dragging;
 } vx_camera;
 
+static void vx_camera_print_code(vx_camera const* const camera)
+{
+    printf(
+        "vxray_instance.camera = (vx_camera){\n"
+        "        .position = float3(%ff, %ff, %ff),\n"
+        "        .yaw = %ff,\n"
+        "        .pitch = %ff,\n"
+        "        .mouse_dragging = false};\n",
+        camera->position.x, camera->position.y, camera->position.z, camera->yaw, camera->pitch);
+}
+
 static void vx_camera_basis(vx_camera const* const camera, float3* const right, float3* const up,
                             float3* const forward)
 {
@@ -654,6 +665,11 @@ SDL_AppResult SDL_AppEvent(void* const appstate, SDL_Event* const event)
     if (event->type == SDL_EVENT_QUIT)
     {
         return SDL_APP_SUCCESS;
+    }
+    if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
+        event->key.scancode == SDL_SCANCODE_F2)
+    {
+        vx_camera_print_code(&vxray_instance.camera);
     }
     if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && event->button.button == SDL_BUTTON_LEFT)
     {

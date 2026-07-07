@@ -35,6 +35,18 @@ cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON   \
                -DCMAKE_BUILD_TYPE=Debug
 ```
 
+## Run
+
+### vxray
+
+Run vxray with a Magicavoxel file:
+
+```sh
+./build/vxray <file.vox>
+```
+
+Print the current camera coordinates as a `vx_camera` initializer by pressing F2.
+
 ## References
 
 - _Ray Axis-Aligned Bounding Box Intersection_, [Ray Tracing Gems II](https://developer.nvidia.com/ray-tracing-gems-ii)
