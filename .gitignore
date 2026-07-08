@@ -1,6 +1,7 @@
 ### Project ###
 
 build*/
+traces/
 
 ### CMake ###
 CMakeLists.txt.user
