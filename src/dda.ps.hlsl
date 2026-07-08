@@ -7,7 +7,7 @@ struct ps_input
 
 ConstantBuffer<dda_uniforms> uniforms : register(b0, space3);
 
-StructuredBuffer<uint> voxels : register(t0, space2);
+ByteAddressBuffer      voxels : register(t0, space2);
 StructuredBuffer<uint> palette_rgba : register(t1, space2);
 
 float3 unpack_rgba(uint const rgba)
@@ -20,8 +20,11 @@ float3 unpack_rgba(uint const rgba)
 
 uint voxel_at(int3 const p)
 {
-    int const i = p.x + p.y * uniforms.grid_ext + p.z * uniforms.grid_ext * uniforms.grid_ext;
-    return voxels[i];
+    int const  i = p.x + p.y * uniforms.grid_ext + p.z * uniforms.grid_ext * uniforms.grid_ext;
+    uint const byte_idx = (uint)i;
+    uint const word = voxels.Load(byte_idx & ~3u);
+    uint const byte_shift = 8u * (byte_idx & 3u);
+    return (word >> byte_shift) & 255u;
 }
 
 bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,

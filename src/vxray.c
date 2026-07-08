@@ -62,7 +62,7 @@
 
 #define vx_buffer_free(b) free((b).ptr)
 
-vx_buffer_decl(uint32_t);
+vx_buffer_decl(uint8_t);
 
 static uint32_t vx_next_power_of_2(uint32_t x)
 {
@@ -538,7 +538,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
         int const grid_ext = (int)vx_next_power_of_2((uint32_t)largest_extent);
         int const total_voxels = grid_ext * grid_ext * grid_ext;
-        vx_buffer(uint32_t) voxel_grid = vx_buffer_calloc(uint32_t, total_voxels);
+        int const voxel_grid_size = (total_voxels + 3) & ~3;
+        vx_buffer(uint8_t) voxel_grid = vx_buffer_calloc(uint8_t, voxel_grid_size);
         assert(voxel_grid.ptr);
         vxray_instance.grid_ext = grid_ext;
         cvox_palette const palette = scene->palette;
@@ -587,7 +588,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
                             int const dest_idx = dx + dy * grid_ext + dz * grid_ext * grid_ext;
                             assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
-                            voxel_grid.ptr[dest_idx] = (uint32_t)voxel;
+                            voxel_grid.ptr[dest_idx] = voxel;
                         }
                     }
                 }
@@ -599,8 +600,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             SDL_GPUDevice* const device = vxray_instance.gpu_device;
 
             {
-                uint32_t const voxel_buffer_size =
-                    (uint32_t)((size_t)voxel_grid.count * sizeof(uint32_t));
+                uint32_t const       voxel_buffer_size = (uint32_t)voxel_grid.count;
                 SDL_GPUBuffer* const voxel_buffer = SDL_CreateGPUBuffer(
                     device,
                     &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
