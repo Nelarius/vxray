@@ -175,17 +175,74 @@ static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* con
     }
 
     SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd);
-    if (!copy_pass)
+    assert(copy_pass);
+    SDL_UploadToGPUBuffer(
+        copy_pass, &(SDL_GPUTransferBufferLocation){.transfer_buffer = transfer, .offset = 0},
+        &(SDL_GPUBufferRegion){.buffer = buffer, .offset = 0, .size = size}, false);
+    SDL_EndGPUCopyPass(copy_pass);
+
+    bool const submitted = SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    if (!submitted)
     {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to begin GPU copy pass: %s", SDL_GetError());
-        SDL_CancelGPUCommandBuffer(cmd);
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to submit GPU upload command buffer: %s",
+                     SDL_GetError());
+        return false;
+    }
+
+    return true;
+}
+
+static bool vx_gpu_texture_upload(SDL_GPUDevice* const device, SDL_GPUTexture* const texture,
+                                  void* const data, uint32_t const size, uint32_t grid_ext)
+{
+    SDL_GPUTransferBuffer* const transfer = SDL_CreateGPUTransferBuffer(
+        device, &(SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                                                   .size = size});
+    if (!transfer)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create GPU transfer buffer: %s",
+                     SDL_GetError());
+        return false;
+    }
+
+    void* const mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    if (!mapped)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to map GPU transfer buffer: %s", SDL_GetError());
         SDL_ReleaseGPUTransferBuffer(device, transfer);
         return false;
     }
 
-    SDL_UploadToGPUBuffer(
-        copy_pass, &(SDL_GPUTransferBufferLocation){.transfer_buffer = transfer, .offset = 0},
-        &(SDL_GPUBufferRegion){.buffer = buffer, .offset = 0, .size = size}, false);
+    SDL_memcpy(mapped, data, size);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+
+    SDL_GPUCommandBuffer* const cmd = SDL_AcquireGPUCommandBuffer(device);
+    if (!cmd)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire GPU command buffer: %s",
+                     SDL_GetError());
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+
+    SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd);
+    assert(copy_pass);
+    SDL_UploadToGPUTexture(copy_pass,
+                           &(SDL_GPUTextureTransferInfo){.transfer_buffer = transfer,
+                                                         .offset = 0,
+                                                         .pixels_per_row = grid_ext,
+                                                         .rows_per_layer = grid_ext},
+                           &(SDL_GPUTextureRegion){.texture = texture,
+                                                   .mip_level = 0,
+                                                   .layer = 0,
+                                                   .x = 0,
+                                                   .y = 0,
+                                                   .z = 0,
+                                                   .w = grid_ext,
+                                                   .h = grid_ext,
+                                                   .d = grid_ext},
+                           false);
     SDL_EndGPUCopyPass(copy_pass);
 
     bool const submitted = SDL_SubmitGPUCommandBuffer(cmd);
@@ -294,7 +351,7 @@ typedef struct vxray
 
     // GPU
     SDL_GPUGraphicsPipeline* pipeline;
-    SDL_GPUBuffer*           voxel_buffer;
+    SDL_GPUTexture*          voxel_texture;
     SDL_GPUBuffer*           palette_buffer;
 } vxray;
 
@@ -381,8 +438,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 0,
-                                                 .num_storage_textures = 0,
-                                                 .num_storage_buffers = 2,
+                                                 .num_storage_textures = 1,
+                                                 .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
@@ -599,26 +656,41 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         {
             SDL_GPUDevice* const device = vxray_instance.gpu_device;
 
+            if (!SDL_GPUTextureSupportsFormat(vxray_instance.gpu_device,
+                                              SDL_GPU_TEXTUREFORMAT_R8_UINT, SDL_GPU_TEXTURETYPE_3D,
+                                              SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
             {
-                uint32_t const       voxel_buffer_size = (uint32_t)voxel_grid.count;
-                SDL_GPUBuffer* const voxel_buffer = SDL_CreateGPUBuffer(
+                SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                             "TEXTUREFORMAT_R8_UINT not supported on this device");
+                return SDL_APP_FAILURE;
+            }
+
+            {
+                uint32_t const        voxel_buffer_size = (uint32_t)voxel_grid.count;
+                SDL_GPUTexture* const voxel_texture = SDL_CreateGPUTexture(
                     device,
-                    &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
-                                               .size = voxel_buffer_size});
-                if (!voxel_buffer)
+                    &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                                .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                                .width = grid_ext,
+                                                .height = grid_ext,
+                                                .layer_count_or_depth = grid_ext,
+                                                .num_levels = 1,
+                                                .sample_count = SDL_GPU_SAMPLECOUNT_1});
+                if (!voxel_texture)
                 {
-                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel buffer: %s",
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel texture: %s",
                                  SDL_GetError());
                     vx_buffer_free(voxel_grid);
                     return SDL_APP_FAILURE;
                 }
-                if (!vx_gpu_buffer_upload(device, voxel_buffer, voxel_grid.ptr, voxel_buffer_size))
+                if (!vx_gpu_texture_upload(device, voxel_texture, voxel_grid.ptr, voxel_buffer_size,
+                                           grid_ext))
                 {
-                    SDL_ReleaseGPUBuffer(device, voxel_buffer);
                     vx_buffer_free(voxel_grid);
                     return SDL_APP_FAILURE;
                 }
-                vxray_instance.voxel_buffer = voxel_buffer;
+                vxray_instance.voxel_texture = voxel_texture;
             }
             {
                 uint32_t const palette_size = 4 * 256;
@@ -754,9 +826,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(render_pass);
 
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.pipeline);
-    SDL_BindGPUFragmentStorageBuffers(
-        render_pass, 0,
-        (SDL_GPUBuffer*[]){vxray_instance.voxel_buffer, vxray_instance.palette_buffer}, 2);
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, &vxray_instance.palette_buffer, 1);
+    SDL_BindGPUFragmentStorageTextures(render_pass, 0, &vxray_instance.voxel_texture, 1);
 
     float3 right = {0};
     float3 up = {0};
@@ -792,10 +863,10 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.palette_buffer = 0;
     }
 
-    if (vxray_instance.voxel_buffer)
+    if (vxray_instance.voxel_texture)
     {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.voxel_buffer);
-        vxray_instance.voxel_buffer = 0;
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.voxel_texture);
+        vxray_instance.voxel_texture = 0;
     }
 
     if (vxray_instance.pipeline)

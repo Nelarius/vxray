@@ -36,6 +36,22 @@ touch src/fullscreen.ps.hlsl
 cmake --build build --target compile-vxray-shaders
 ```
 
+### Shader resource bindings
+
+SDL GPU requires specific ordering of the resource bindings.
+
+For vertex shaders:
+
+(t[n], space0): Sampled textures, followed by storage textures, followed by storage buffers
+(s[n], space0): Samplers with indices corresponding to the sampled textures
+(b[n], space1): Uniform buffers
+
+For pixel shaders:
+
+(t[n], space2): Sampled textures, followed by storage textures, followed by storage buffers
+(s[n], space2): Samplers with indices corresponding to the sampled textures
+(b[n], space3): Uniform buffers
+
 ## Lint command
 
 When done with code changes, the code must be formatted with clang-format:
