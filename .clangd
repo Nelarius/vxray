@@ -9,7 +9,6 @@ Diagnostics:
       - clang-analyzer-unix.*
       - misc-*
       - readability-identifier-naming
-      - readability-function-cognitive-complexity
       - performance-*
     Remove:
       - misc-no-recursion
