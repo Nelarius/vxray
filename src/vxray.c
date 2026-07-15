@@ -142,6 +142,197 @@ static float4 vx_float4_from_float3(float3 const v, float const w)
     return float4(v.x, v.y, v.z, w);
 }
 
+typedef struct vx_scene
+{
+    vx_buffer(uint8_t) grid;
+    uint   palette[256];
+    int    grid_ext;
+    float3 center;
+} vx_scene;
+
+// Loads a MagicaVoxel scene into a flat voxel grid. Free scene->grid with `vx_buffer_free`.
+static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
+{
+    assert(vox_path);
+    assert(out_scene);
+
+    vx_buffer(uint8_t) voxel_grid = {0};
+    cvox_scene const* scene = 0;
+    {
+        size_t   num_bytes;
+        uint8_t* buffer = SDL_LoadFile(vox_path, &num_bytes);
+        if (!buffer || !num_bytes)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load %s", vox_path);
+            SDL_free(buffer);
+            return false;
+        }
+
+        scene = cvox_read_scene(buffer, num_bytes);
+        SDL_free(buffer);
+    }
+
+    if (!scene)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene from %s", vox_path);
+        return false;
+    }
+    if (scene->num_instances == 0 || scene->num_models == 0)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene has no instances or models");
+        goto cleanup_scene;
+    }
+
+    {
+        int3 scene_min = {.x = INT32_MAX, .y = INT32_MAX, .z = INT32_MAX};
+        int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
+
+        for (int i = 0; i < scene->num_instances; ++i)
+        {
+            cvox_instance const* const instance = &scene->instances[i];
+            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
+            assert(model_idx < scene->num_models);
+
+            cvox_model const* const model = scene->models[model_idx];
+            assert(model);
+            if (model->size_x == 0 || model->size_y == 0 || model->size_z == 0)
+            {
+                // NOTE: empty model -- does model->voxel_hash have a sentinel value we could look
+                // up?
+                continue;
+            }
+
+            cvox_transform const transform =
+                cvox_sample_instance_transform_global(instance, 0, scene);
+            int3 const   pivot = {.x = (int)(model->size_x / 2),
+                                  .y = (int)(model->size_y / 2),
+                                  .z = (int)(model->size_z / 2)};
+            float const  min_x = (float)-pivot.x;
+            float const  min_y = (float)-pivot.y;
+            float const  min_z = (float)-pivot.z;
+            float const  max_x = (float)((int)model->size_x - 1 - pivot.x);
+            float const  max_y = (float)((int)model->size_y - 1 - pivot.y);
+            float const  max_z = (float)((int)model->size_z - 1 - pivot.z);
+            float3 const corners[8] = {{min_x, min_y, min_z}, {max_x, min_y, min_z},
+                                       {min_x, max_y, min_z}, {min_x, min_y, max_z},
+                                       {max_x, max_y, min_z}, {max_x, min_y, max_z},
+                                       {min_x, max_y, max_z}, {max_x, max_y, max_z}};
+            for (int c = 0; c < 8; ++c)
+            {
+                float3 const tc = vx_transform_point(&transform, corners[c]);
+                int const    rx = vx_round_to_int(tc.x);
+                int const    ry = vx_round_to_int(tc.y);
+                int const    rz = vx_round_to_int(tc.z);
+                scene_min = (int3){SDL_min(rx, scene_min.x), SDL_min(ry, scene_min.y),
+                                   SDL_min(rz, scene_min.z)};
+                scene_max = (int3){SDL_max(rx, scene_max.x), SDL_max(ry, scene_max.y),
+                                   SDL_max(rz, scene_max.z)};
+            }
+        }
+
+        if (scene_min.x > scene_max.x || scene_min.y > scene_max.y || scene_min.z > scene_max.z)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Scene has no valid instances with non-empty models");
+            goto cleanup_scene;
+        }
+
+        int const scene_ext_x = scene_max.x - scene_min.x + 1;
+        int const scene_ext_y = scene_max.y - scene_min.y + 1;
+        int const scene_ext_z = scene_max.z - scene_min.z + 1;
+        assert(scene_ext_x > 0);
+        assert(scene_ext_y > 0);
+        assert(scene_ext_z > 0);
+        int const largest_extent = SDL_max(scene_ext_x, SDL_max(scene_ext_y, scene_ext_z));
+        if (largest_extent > 1024) // NOTE: 1024^ 3 is (1 << 30)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene extent is too large: %d",
+                         largest_extent);
+            goto cleanup_scene;
+        }
+
+        int const grid_ext = (int)vx_next_power_of_2((uint32_t)largest_extent);
+        int const total_voxels = grid_ext * grid_ext * grid_ext;
+        assert(total_voxels % 4 == 0);
+        voxel_grid = vx_buffer_calloc(uint8_t, total_voxels);
+        if (!voxel_grid.ptr)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate voxel grid");
+            goto cleanup_scene;
+        }
+
+        for (int i = 0; i < (int)scene->num_instances; ++i)
+        {
+            cvox_instance const* const instance = &scene->instances[i];
+            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
+
+            cvox_model const* const model = scene->models[model_idx];
+            assert(model);
+
+            cvox_transform const transform =
+                cvox_sample_instance_transform_global(instance, 0, scene);
+
+            int const  sx = (int)model->size_x;
+            int const  sy = (int)model->size_y;
+            int const  sz = (int)model->size_z;
+            int3 const pivot = {.x = (int)(model->size_x / 2),
+                                .y = (int)(model->size_y / 2),
+                                .z = (int)(model->size_z / 2)};
+            for (int z = 0; z < sz; ++z)
+            {
+                for (int y = 0; y < sy; ++y)
+                {
+                    for (int x = 0; x < sx; ++x)
+                    {
+                        int const     src_idx = x + y * sx + z * sx * sy;
+                        uint8_t const voxel = model->voxel_data[src_idx];
+                        if (voxel)
+                        {
+                            float3 const local_coord = {.x = (float)(x - pivot.x),
+                                                        .y = (float)(y - pivot.y),
+                                                        .z = (float)(z - pivot.z)};
+                            float3 const global_coord = vx_transform_point(&transform, local_coord);
+
+                            int const gx = vx_round_to_int(global_coord.x);
+                            int const gy = vx_round_to_int(global_coord.y);
+                            int const gz = vx_round_to_int(global_coord.z);
+                            int const dx = gx - scene_min.x;
+                            int const dy = gy - scene_min.y;
+                            int const dz = gz - scene_min.z;
+                            assert(dx >= 0 && dx < grid_ext);
+                            assert(dy >= 0 && dy < grid_ext);
+                            assert(dz >= 0 && dz < grid_ext);
+
+                            int const dest_idx = dx + dy * grid_ext + dz * grid_ext * grid_ext;
+                            assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
+                            voxel_grid.ptr[dest_idx] = voxel;
+                        }
+                    }
+                }
+            }
+        }
+
+        out_scene->grid_ext = grid_ext;
+        out_scene->center =
+            float3(0.5f * (float)scene_ext_x, 0.5f * (float)scene_ext_y, 0.5f * (float)scene_ext_z);
+    }
+
+    out_scene->grid = voxel_grid;
+    for (int i = 0; i < 256; ++i)
+    {
+        cvox_rgba const color = scene->palette.color[i];
+        out_scene->palette[i] =
+            (uint)color.r | ((uint)color.g << 8u) | ((uint)color.b << 16u) | ((uint)color.a << 24u);
+    }
+    cvox_destroy_scene(scene);
+    return true;
+
+cleanup_scene:
+    assert(scene);
+    cvox_destroy_scene(scene);
+    return false;
+}
+
 static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* const buffer,
                                  void const* const data, uint32_t const size)
 {
@@ -489,7 +680,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     }
 
     {
-        cvox_scene const* scene = 0;
+        vx_scene scene = {0};
         {
             char const* vox_file = argv[1];
 
@@ -499,159 +690,14 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "%s doesn't exist", vox_file);
                 return SDL_APP_FAILURE;
             }
-
-            size_t   num_bytes;
-            uint8_t* buffer = SDL_LoadFile(vox_file, &num_bytes);
-            if (!buffer || !num_bytes)
+            if (!vx_load_scene(vox_file, &scene))
             {
-                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load %s", vox_file);
                 return SDL_APP_FAILURE;
             }
-
-            scene = cvox_read_scene(buffer, num_bytes);
-
-            SDL_free(buffer);
+            assert(scene.grid.ptr);
+            assert(scene.grid_ext);
+            vxray_instance.grid_ext = scene.grid_ext;
         }
-        if (scene == 0)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load scene from %s", argv[1]);
-            return SDL_APP_FAILURE;
-        }
-        if (scene->num_instances == 0 || scene->num_models == 0)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene has no instances or models");
-            cvox_destroy_scene(scene);
-            return SDL_APP_FAILURE;
-        }
-
-        int3 scene_min = {.x = INT32_MAX, .y = INT32_MAX, .z = INT32_MAX};
-        int3 scene_max = {.x = INT32_MIN, .y = INT32_MIN, .z = INT32_MIN};
-
-        for (int i = 0; i < scene->num_instances; ++i)
-        {
-            cvox_instance const* const instance = &scene->instances[i];
-            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
-            assert(model_idx < scene->num_models);
-
-            cvox_model const* const model = scene->models[model_idx];
-            assert(model);
-            if (model->size_x == 0 || model->size_y == 0 || model->size_z == 0)
-            {
-                // NOTE: empty model -- does model->voxel_hash have a sentinel value we could look
-                // up?
-                continue;
-            }
-
-            cvox_transform const transform =
-                cvox_sample_instance_transform_global(instance, 0, scene);
-            int3 const   pivot = {.x = (int)(model->size_x / 2),
-                                  .y = (int)(model->size_y / 2),
-                                  .z = (int)(model->size_z / 2)};
-            float const  min_x = (float)-pivot.x;
-            float const  min_y = (float)-pivot.y;
-            float const  min_z = (float)-pivot.z;
-            float const  max_x = (float)((int)model->size_x - 1 - pivot.x);
-            float const  max_y = (float)((int)model->size_y - 1 - pivot.y);
-            float const  max_z = (float)((int)model->size_z - 1 - pivot.z);
-            float3 const corners[8] = {{min_x, min_y, min_z}, {max_x, min_y, min_z},
-                                       {min_x, max_y, min_z}, {min_x, min_y, max_z},
-                                       {max_x, max_y, min_z}, {max_x, min_y, max_z},
-                                       {min_x, max_y, max_z}, {max_x, max_y, max_z}};
-            for (int c = 0; c < 8; ++c)
-            {
-                float3 const tc = vx_transform_point(&transform, corners[c]);
-                int const    rx = vx_round_to_int(tc.x);
-                int const    ry = vx_round_to_int(tc.y);
-                int const    rz = vx_round_to_int(tc.z);
-                scene_min = (int3){SDL_min(rx, scene_min.x), SDL_min(ry, scene_min.y),
-                                   SDL_min(rz, scene_min.z)};
-                scene_max = (int3){SDL_max(rx, scene_max.x), SDL_max(ry, scene_max.y),
-                                   SDL_max(rz, scene_max.z)};
-            }
-        }
-
-        if (scene_min.x > scene_max.x || scene_min.y > scene_max.y || scene_min.z > scene_max.z)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Scene has no valid instances with non-empty models");
-            cvox_destroy_scene(scene);
-            return SDL_APP_FAILURE;
-        }
-
-        int const scene_ext_x = scene_max.x - scene_min.x + 1;
-        int const scene_ext_y = scene_max.y - scene_min.y + 1;
-        int const scene_ext_z = scene_max.z - scene_min.z + 1;
-        assert(scene_ext_x > 0);
-        assert(scene_ext_y > 0);
-        assert(scene_ext_z > 0);
-        int const largest_extent = SDL_max(scene_ext_x, SDL_max(scene_ext_y, scene_ext_z));
-        if (largest_extent > 1024) // NOTE: 1024^ 3 is (1 << 30)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene extent is too large: %d",
-                         largest_extent);
-            cvox_destroy_scene(scene);
-            return SDL_APP_FAILURE;
-        }
-
-        int const grid_ext = (int)vx_next_power_of_2((uint32_t)largest_extent);
-        int const total_voxels = grid_ext * grid_ext * grid_ext;
-        int const voxel_grid_size = (total_voxels + 3) & ~3;
-        vx_buffer(uint8_t) voxel_grid = vx_buffer_calloc(uint8_t, voxel_grid_size);
-        assert(voxel_grid.ptr);
-        vxray_instance.grid_ext = grid_ext;
-        cvox_palette const palette = scene->palette;
-
-        for (int i = 0; i < (int)scene->num_instances; ++i)
-        {
-            cvox_instance const* const instance = &scene->instances[i];
-            int const                  model_idx = (int)cvox_sample_instance_model(instance, 0);
-
-            cvox_model const* const model = scene->models[model_idx];
-            assert(model);
-
-            cvox_transform const transform =
-                cvox_sample_instance_transform_global(instance, 0, scene);
-
-            int const  sx = (int)model->size_x;
-            int const  sy = (int)model->size_y;
-            int const  sz = (int)model->size_z;
-            int3 const pivot = {.x = (int)(model->size_x / 2),
-                                .y = (int)(model->size_y / 2),
-                                .z = (int)(model->size_z / 2)};
-            for (int z = 0; z < sz; ++z)
-            {
-                for (int y = 0; y < sy; ++y)
-                {
-                    for (int x = 0; x < sx; ++x)
-                    {
-                        int const     src_idx = x + y * sx + z * sx * sy;
-                        uint8_t const voxel = model->voxel_data[src_idx];
-                        if (voxel)
-                        {
-                            float3 const local_coord = {.x = (float)(x - pivot.x),
-                                                        .y = (float)(y - pivot.y),
-                                                        .z = (float)(z - pivot.z)};
-                            float3 const global_coord = vx_transform_point(&transform, local_coord);
-
-                            int const gx = vx_round_to_int(global_coord.x);
-                            int const gy = vx_round_to_int(global_coord.y);
-                            int const gz = vx_round_to_int(global_coord.z);
-                            int const dx = gx - scene_min.x;
-                            int const dy = gy - scene_min.y;
-                            int const dz = gz - scene_min.z;
-                            assert(dx >= 0 && dx < grid_ext);
-                            assert(dy >= 0 && dy < grid_ext);
-                            assert(dz >= 0 && dz < grid_ext);
-
-                            int const dest_idx = dx + dy * grid_ext + dz * grid_ext * grid_ext;
-                            assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
-                            voxel_grid.ptr[dest_idx] = voxel;
-                        }
-                    }
-                }
-            }
-        }
-        cvox_destroy_scene(scene);
 
         {
             SDL_GPUDevice* const device = vxray_instance.gpu_device;
@@ -662,39 +708,41 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             {
                 SDL_LogError(SDL_LOG_CATEGORY_GPU,
                              "TEXTUREFORMAT_R8_UINT not supported on this device");
+                vx_buffer_free(scene.grid);
                 return SDL_APP_FAILURE;
             }
 
             {
-                uint32_t const        voxel_buffer_size = (uint32_t)voxel_grid.count;
+                uint32_t const        voxel_buffer_size = (uint32_t)scene.grid.count;
                 SDL_GPUTexture* const voxel_texture = SDL_CreateGPUTexture(
                     device,
                     &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
                                                 .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
                                                 .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
-                                                .width = grid_ext,
-                                                .height = grid_ext,
-                                                .layer_count_or_depth = grid_ext,
+                                                .width = scene.grid_ext,
+                                                .height = scene.grid_ext,
+                                                .layer_count_or_depth = scene.grid_ext,
                                                 .num_levels = 1,
                                                 .sample_count = SDL_GPU_SAMPLECOUNT_1});
                 if (!voxel_texture)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel texture: %s",
                                  SDL_GetError());
-                    vx_buffer_free(voxel_grid);
+                    vx_buffer_free(scene.grid);
                     return SDL_APP_FAILURE;
                 }
-                if (!vx_gpu_texture_upload(device, voxel_texture, voxel_grid.ptr, voxel_buffer_size,
-                                           grid_ext))
+                if (!vx_gpu_texture_upload(device, voxel_texture, scene.grid.ptr, voxel_buffer_size,
+                                           (uint32_t)scene.grid_ext))
                 {
-                    vx_buffer_free(voxel_grid);
+                    SDL_ReleaseGPUTexture(device, voxel_texture);
+                    vx_buffer_free(scene.grid);
                     return SDL_APP_FAILURE;
                 }
                 vxray_instance.voxel_texture = voxel_texture;
             }
             {
                 uint32_t const palette_size = 4 * 256;
-                assert(palette_size == sizeof(palette));
+                assert(palette_size == sizeof(scene.palette));
                 SDL_GPUBuffer* const palette_buffer = SDL_CreateGPUBuffer(
                     device,
                     &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
@@ -703,28 +751,26 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create palette buffer: %s",
                                  SDL_GetError());
-                    vx_buffer_free(voxel_grid);
+                    vx_buffer_free(scene.grid);
                     return SDL_APP_FAILURE;
                 }
-                if (!vx_gpu_buffer_upload(device, palette_buffer, palette.color, palette_size))
+                if (!vx_gpu_buffer_upload(device, palette_buffer, scene.palette, palette_size))
                 {
                     SDL_ReleaseGPUBuffer(device, palette_buffer);
-                    vx_buffer_free(voxel_grid);
+                    vx_buffer_free(scene.grid);
                     return SDL_APP_FAILURE;
                 }
 
                 vxray_instance.palette_buffer = palette_buffer;
             }
 
-            vx_buffer_free(voxel_grid);
+            vx_buffer_free(scene.grid);
         }
 
-        float const  view_radius = 0.5f * (float)grid_ext;
-        float3 const scene_center =
-            float3(0.5f * (float)scene_ext_x, 0.5f * (float)scene_ext_y, 0.5f * (float)scene_ext_z);
+        float const view_radius = 0.5f * (float)scene.grid_ext;
         vxray_instance.camera.position =
-            vx_float3_add(scene_center, float3(0.f, view_radius * 0.3f, -view_radius * 2.8f));
-        vx_camera_look_at(&vxray_instance.camera, scene_center);
+            vx_float3_add(scene.center, float3(0.f, view_radius * 0.3f, -view_radius * 2.8f));
+        vx_camera_look_at(&vxray_instance.camera, scene.center);
     }
 
     return SDL_APP_CONTINUE;
