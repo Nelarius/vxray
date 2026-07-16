@@ -121,7 +121,6 @@ float4 main(ps_input const input) : SV_Target0
     }
     else
     {
-
         return float4(0.02, 0.025, 0.03, 1.0);
     }
 }
