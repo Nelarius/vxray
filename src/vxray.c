@@ -1,3 +1,4 @@
+#include "constants.h"
 #include "cvox.h"
 #include "dda.h"
 #include "hlsl_shim.h"
@@ -61,8 +62,6 @@
     (vx_##T##_buffer) { .ptr = calloc((N), sizeof(T)), .count = (N) }
 
 #define vx_buffer_free(b) free((b).ptr)
-
-#define VX_MACRO_CELL_EXT 8
 
 vx_buffer_decl(uint8_t);
 
@@ -146,7 +145,7 @@ static float4 vx_float4_from_float3(float3 const v, float const w)
 
 typedef struct vx_scene
 {
-    vx_buffer(uint8_t) grid;
+    vx_buffer(uint8_t) voxel_grid;
     vx_buffer(uint8_t) macro_grid;
     uint   palette[256];
     int    grid_ext;
@@ -341,7 +340,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             float3(0.5f * (float)scene_ext_x, 0.5f * (float)scene_ext_y, 0.5f * (float)scene_ext_z);
     }
 
-    out_scene->grid = voxel_grid;
+    out_scene->voxel_grid = voxel_grid;
     out_scene->macro_grid = macro_grid;
     for (int i = 0; i < 256; ++i)
     {
@@ -365,9 +364,9 @@ static void vx_scene_free(vx_scene* const scene)
 {
     assert(scene);
     vx_buffer_free(scene->macro_grid);
-    vx_buffer_free(scene->grid);
+    vx_buffer_free(scene->voxel_grid);
     scene->macro_grid = (vx_buffer(uint8_t)){0};
-    scene->grid = (vx_buffer(uint8_t)){0};
+    scene->voxel_grid = (vx_buffer(uint8_t)){0};
 }
 
 static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* const buffer,
@@ -758,7 +757,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             {
                 return SDL_APP_FAILURE;
             }
-            assert(scene.grid.ptr);
+            assert(scene.voxel_grid.ptr);
             assert(scene.grid_ext);
             vxray_instance.grid_ext = scene.grid_ext;
         }
@@ -777,7 +776,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             }
 
             {
-                uint32_t const        voxel_buffer_size = (uint32_t)scene.grid.count;
+                uint32_t const        voxel_buffer_size = (uint32_t)scene.voxel_grid.count;
                 SDL_GPUTexture* const voxel_texture = SDL_CreateGPUTexture(
                     device,
                     &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
@@ -795,8 +794,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
-                if (!vx_gpu_texture_upload(device, voxel_texture, scene.grid.ptr, voxel_buffer_size,
-                                           (uint32_t)scene.grid_ext))
+                if (!vx_gpu_texture_upload(device, voxel_texture, scene.voxel_grid.ptr,
+                                           voxel_buffer_size, (uint32_t)scene.grid_ext))
                 {
                     vx_scene_free(&scene);
                     return SDL_APP_FAILURE;

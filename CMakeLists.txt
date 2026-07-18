@@ -40,6 +40,7 @@ set(VXRAY_SOURCES
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.h>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.c>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
+        constants.h
         cvox.cc
         cvox.h
         dda.h
