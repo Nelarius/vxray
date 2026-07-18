@@ -8,7 +8,10 @@ struct ps_input
 ConstantBuffer<dda_uniforms> uniforms : register(b0, space3);
 
 Texture3D<uint>        voxels : register(t0, space2);
-StructuredBuffer<uint> palette_rgba : register(t1, space2);
+Texture3D<uint>        macro : register(t1, space2);
+StructuredBuffer<uint> palette_rgba : register(t2, space2);
+
+static int const macro_cell_ext = 8;
 
 float3 unpack_rgba(uint const rgba)
 {
@@ -19,6 +22,8 @@ float3 unpack_rgba(uint const rgba)
 }
 
 uint voxel_at(int3 const p) { return voxels.Load(int4(p, 0)).r; }
+
+uint macro_at(int3 const p) { return macro.Load(int4(p, 0)).r; }
 
 bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
                   float3 const p1, out float tmin, out float tmax)
@@ -34,37 +39,22 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     return tmin <= tmax;
 }
 
-// Good insight into DDA: https://news.ycombinator.com/item?id=43599990
-
-uint dda(float3 const origin, float3 const dir)
+uint trace_macro_cell(float3 const origin, float3 const dir, float3 const inv_dir,
+                      float3 const inv_abs_dir, int3 const macro_cell)
 {
-    float3 const inv_dir = 1.0 / dir;
-    float3 const inv_abs_dir = abs(inv_dir);
-
-    // Ray-bounds test
-
-    float tmin;
-    float tmax;
+    float      tmin;
+    float      tmax;
+    int3 const macro_min = macro_cell * macro_cell_ext;
+    int const  max_idx = uniforms.grid_ext - 1;
+    int3 const min_cell = macro_min;
+    int3 const max_cell = min(macro_min + macro_cell_ext - 1, int3(max_idx, max_idx, max_idx));
+    if (!ray_box_test(origin, inv_dir, float3(min_cell), float3(max_cell + 1), tmin, tmax))
     {
-        float const  ext = (float)uniforms.grid_ext;
-        float3 const bmin = float3(0.0, 0.0, 0.0);
-        float3 const bmax = float3(ext, ext, ext);
-        if (!ray_box_test(origin, 1.0 / dir, bmin, bmax, tmin, tmax))
-        {
-            return 0u;
-        }
+        return 0u;
     }
 
-    // Calculate the number of steps along the ray
-
     float3 const entry = origin + tmin * dir;
-    int const    max_idx = uniforms.grid_ext - 1;
-    int3 const   min_cell = int3(0, 0, 0);
-    int3 const   max_cell = int3(max_idx, max_idx, max_idx);
     int3 const   start_cell = clamp(int3(entry), min_cell, max_cell);
-
-    // Initialize traversal vectors
-
     float3 const s = sign(dir);
     int3 const   step_dir = int3(s);
     float3 const next = float3(start_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0));
@@ -75,9 +65,7 @@ uint dda(float3 const origin, float3 const dir)
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
     float3 const tdelta = inv_abs_dir;
 
-    // Trace voxels
-
-    for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
+    for (int i = 0; i < 3 * macro_cell_ext; ++i)
     {
         if (any(cell < min_cell) || any(cell > max_cell))
         {
@@ -95,6 +83,65 @@ uint dda(float3 const origin, float3 const dir)
         float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
         tnext += axis_mask * tdelta;
         cell += int3(axis_mask) * step_dir;
+    }
+
+    return 0u;
+}
+
+// Good insight into DDA: https://news.ycombinator.com/item?id=43599990
+
+uint dda(float3 const origin, float3 const dir)
+{
+    float3 const inv_dir = 1.0 / dir;
+    float3 const inv_abs_dir = abs(inv_dir);
+
+    float       tmin;
+    float       tmax;
+    float const ext = (float)uniforms.grid_ext;
+    if (!ray_box_test(origin, inv_dir, float3(0.0, 0.0, 0.0), float3(ext, ext, ext), tmin, tmax))
+    {
+        return 0u;
+    }
+
+    // Traverse macro cells first, only running the voxel DDA for occupied cells.
+    float3 const entry = origin + tmin * dir;
+    int const    max_macro_idx = (uniforms.grid_ext - 1) / macro_cell_ext;
+    int3 const   min_macro_cell = int3(0, 0, 0);
+    int3 const   max_macro_cell = int3(max_macro_idx, max_macro_idx, max_macro_idx);
+    int3 macro_cell = clamp(int3(entry / (float)macro_cell_ext), min_macro_cell, max_macro_cell);
+
+    float3 const s = sign(dir);
+    int3 const   step_dir = int3(s);
+    float3 const next =
+        (float3(macro_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0))) * macro_cell_ext;
+    float3 tnext = (next - entry) * inv_dir;
+    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
+    tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
+    tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
+    float3 const tdelta = (float)macro_cell_ext * inv_abs_dir;
+    int const    macro_grid_ext = max_macro_idx + 1;
+
+    for (int i = 0; i < 3 * macro_grid_ext; ++i)
+    {
+        if (any(macro_cell < min_macro_cell) || any(macro_cell > max_macro_cell))
+        {
+            return 0u;
+        }
+
+        if (macro_at(macro_cell) > 0u)
+        {
+            uint const voxel = trace_macro_cell(origin, dir, inv_dir, inv_abs_dir, macro_cell);
+            if (voxel > 0u)
+            {
+                return voxel;
+            }
+        }
+
+        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
+        // step(a, x) like a < x.
+        float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
+        tnext += axis_mask * tdelta;
+        macro_cell += int3(axis_mask) * step_dir;
     }
 
     return 0u;

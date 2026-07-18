@@ -606,6 +606,7 @@ typedef struct vxray
     // GPU
     SDL_GPUGraphicsPipeline* pipeline;
     SDL_GPUTexture*          voxel_texture;
+    SDL_GPUTexture*          macro_texture;
     SDL_GPUBuffer*           palette_buffer;
 } vxray;
 
@@ -692,7 +693,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 0,
-                                                 .num_storage_textures = 1,
+                                                 .num_storage_textures = 2,
                                                  .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -797,11 +798,37 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 if (!vx_gpu_texture_upload(device, voxel_texture, scene.grid.ptr, voxel_buffer_size,
                                            (uint32_t)scene.grid_ext))
                 {
-                    SDL_ReleaseGPUTexture(device, voxel_texture);
                     vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
                 vxray_instance.voxel_texture = voxel_texture;
+            }
+            {
+                uint32_t const        macro_grid_size = (uint32_t)scene.macro_grid.count;
+                SDL_GPUTexture* const macro_texture = SDL_CreateGPUTexture(
+                    device,
+                    &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                                .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                                .width = scene.macro_grid_ext,
+                                                .height = scene.macro_grid_ext,
+                                                .layer_count_or_depth = scene.macro_grid_ext,
+                                                .num_levels = 1,
+                                                .sample_count = SDL_GPU_SAMPLECOUNT_1});
+                if (!macro_texture)
+                {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create macro grid texture: %s",
+                                 SDL_GetError());
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                if (!vx_gpu_texture_upload(device, macro_texture, scene.macro_grid.ptr,
+                                           macro_grid_size, (uint32_t)scene.macro_grid_ext))
+                {
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                vxray_instance.macro_texture = macro_texture;
             }
             {
                 uint32_t const palette_size = 4 * 256;
@@ -945,8 +972,15 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(render_pass);
 
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.pipeline);
-    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, &vxray_instance.palette_buffer, 1);
-    SDL_BindGPUFragmentStorageTextures(render_pass, 0, &vxray_instance.voxel_texture, 1);
+    SDL_GPUTexture* textures[] = {
+        vxray_instance.voxel_texture,
+        vxray_instance.macro_texture,
+    };
+    SDL_BindGPUFragmentStorageTextures(render_pass, 0, textures, SDL_arraysize(textures));
+    SDL_GPUBuffer* buffers[] = {
+        vxray_instance.palette_buffer,
+    };
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, buffers, SDL_arraysize(buffers));
 
     float3 right = {0};
     float3 up = {0};
@@ -980,6 +1014,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.palette_buffer);
         vxray_instance.palette_buffer = 0;
+    }
+
+    if (vxray_instance.macro_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.macro_texture);
+        vxray_instance.macro_texture = 0;
     }
 
     if (vxray_instance.voxel_texture)
