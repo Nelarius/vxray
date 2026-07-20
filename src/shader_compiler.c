@@ -186,8 +186,8 @@ static bool compile_shader(char const* const input_file, compiled_shader* const 
 
     char command[MAX_COMMAND_LENGTH];
 
-    snprintf(command, sizeof(command), "%s -o \"%s\" -c \"%s\"", metal_command, air_path,
-             metal_path);
+    snprintf(command, sizeof(command), "%s -std=metal3.1 -o \"%s\" -c \"%s\"", metal_command,
+             air_path, metal_path);
     if (!run_command(command))
     {
         fprintf(stderr, "Failed to compile generated MSL %s\n", metal_path);
