@@ -459,12 +459,38 @@ typedef struct vx_camera
 static void vx_camera_print_code(vx_camera const* const camera)
 {
     printf(
-        "vxray_instance.camera = (vx_camera){\n"
-        "        .position = float3(%ff, %ff, %ff),\n"
-        "        .yaw = %ff,\n"
-        "        .pitch = %ff,\n"
-        "        .mouse_dragging = false};\n",
+        "position = %.9g %.9g %.9g\n"
+        "yaw = %.9g\n"
+        "pitch = %.9g\n",
         camera->position.x, camera->position.y, camera->position.z, camera->yaw, camera->pitch);
+}
+
+static bool vx_camera_load(vx_camera* const camera, char const* const path)
+{
+    FILE* const file = fopen(path, "r");
+    if (!file)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Couldn't open camera preset %s\n", path);
+        return false;
+    }
+
+    vx_camera  loaded_camera = {0};
+    int const  parsed = fscanf(file, "position = %f %f %f\nyaw = %f\npitch = %f",
+                               &loaded_camera.position.x, &loaded_camera.position.y,
+                               &loaded_camera.position.z, &loaded_camera.yaw, &loaded_camera.pitch);
+    char       extra = 0;
+    bool const has_extra_data = fscanf(file, " %c", &extra) != EOF;
+    bool const closed = fclose(file) == 0;
+    if (parsed != 5 || has_extra_data || !closed || !isfinite(loaded_camera.position.x) ||
+        !isfinite(loaded_camera.position.y) || !isfinite(loaded_camera.position.z) ||
+        !isfinite(loaded_camera.yaw) || !isfinite(loaded_camera.pitch))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Invalid camera preset %s\n", path);
+        return false;
+    }
+
+    *camera = loaded_camera;
+    return true;
 }
 
 static void vx_camera_basis(vx_camera const* const camera, float3* const right, float3* const up,
@@ -552,9 +578,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
 
-    if (argc < 2)
+    if (argc < 2 || argc > 3)
     {
-        fprintf(stderr, "Usage: %s <file.vox>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <file.vox> [camera.vx]\n", argv[0]);
         return SDL_APP_FAILURE;
     }
 
@@ -767,10 +793,20 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             vx_buffer_free(scene.grid);
         }
 
-        float const view_radius = 0.5f * (float)scene.grid_ext;
-        vxray_instance.camera.position =
-            vx_float3_add(scene.center, float3(0.f, view_radius * 0.3f, -view_radius * 2.8f));
-        vx_camera_look_at(&vxray_instance.camera, scene.center);
+        if (argc == 3)
+        {
+            if (!vx_camera_load(&vxray_instance.camera, argv[2]))
+            {
+                return SDL_APP_FAILURE;
+            }
+        }
+        else
+        {
+            float const view_radius = 0.5f * (float)scene.grid_ext;
+            vxray_instance.camera.position =
+                vx_float3_add(scene.center, float3(0.f, view_radius * 0.3f, -view_radius * 2.8f));
+            vx_camera_look_at(&vxray_instance.camera, scene.center);
+        }
     }
 
     return SDL_APP_CONTINUE;

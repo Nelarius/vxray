@@ -42,10 +42,18 @@ cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON   \
 Run vxray with a Magicavoxel file:
 
 ```sh
-./build/vxray <file.vox>
+./build/vxray <file.vox> [camera.vx]
 ```
 
-Print the current camera coordinates as a `vx_camera` initializer by pressing F2.
+Without a camera preset, vxray uses the default view for the scene. Press F2 to print the current
+camera preset to standard output, then save the three printed lines as a `.vx` file and pass it as
+the optional second argument.
+
+```text
+position = 1 2 3
+yaw = 0
+pitch = 0
+```
 
 ## References
 

@@ -2,6 +2,7 @@
 
 build*/
 traces/
+locations/
 
 ### CMake ###
 CMakeLists.txt.user
