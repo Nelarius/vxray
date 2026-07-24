@@ -1,3 +1,4 @@
+#include "constants.h"
 #include "cvox.h"
 #include "dda.h"
 #include "hlsl_shim.h"
@@ -144,19 +145,23 @@ static float4 vx_float4_from_float3(float3 const v, float const w)
 
 typedef struct vx_scene
 {
-    vx_buffer(uint8_t) grid;
+    vx_buffer(uint8_t) voxel_grid;
+    vx_buffer(uint8_t) brick_grid;
     uint   palette[256];
     int    grid_ext;
+    int    brick_grid_ext;
     float3 center;
 } vx_scene;
 
-// Loads a MagicaVoxel scene into a flat voxel grid. Free scene->grid with `vx_buffer_free`.
+// Loads a MagicaVoxel scene into dense voxel and brick grids. Free both grids with
+// `vx_buffer_free`.
 static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 {
     assert(vox_path);
     assert(out_scene);
 
     vx_buffer(uint8_t) voxel_grid = {0};
+    vx_buffer(uint8_t) brick_grid = {0};
     cvox_scene const* scene = 0;
     {
         size_t   num_bytes;
@@ -261,6 +266,15 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             goto cleanup_scene;
         }
 
+        int const brick_grid_ext = (grid_ext + VX_BRICK_EXT - 1) / VX_BRICK_EXT;
+        int const total_bricks = brick_grid_ext * brick_grid_ext * brick_grid_ext;
+        brick_grid = vx_buffer_calloc(uint8_t, total_bricks);
+        if (!brick_grid.ptr)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate brick grid");
+            goto cleanup_grids;
+        }
+
         for (int i = 0; i < (int)scene->num_instances; ++i)
         {
             cvox_instance const* const instance = &scene->instances[i];
@@ -306,6 +320,14 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
                             int const dest_idx = dx + dy * grid_ext + dz * grid_ext * grid_ext;
                             assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
                             voxel_grid.ptr[dest_idx] = voxel;
+
+                            int const brick_x = dx / VX_BRICK_EXT;
+                            int const brick_y = dy / VX_BRICK_EXT;
+                            int const brick_z = dz / VX_BRICK_EXT;
+                            int const brick_idx =
+                                vx_grid_index(brick_x, brick_y, brick_z, brick_grid_ext);
+                            assert(brick_idx >= 0 && brick_idx < brick_grid.count);
+                            brick_grid.ptr[brick_idx] = 1;
                         }
                     }
                 }
@@ -313,11 +335,13 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
         }
 
         out_scene->grid_ext = grid_ext;
+        out_scene->brick_grid_ext = brick_grid_ext;
         out_scene->center =
             float3(0.5f * (float)scene_ext_x, 0.5f * (float)scene_ext_y, 0.5f * (float)scene_ext_z);
     }
 
-    out_scene->grid = voxel_grid;
+    out_scene->voxel_grid = voxel_grid;
+    out_scene->brick_grid = brick_grid;
     for (int i = 0; i < 256; ++i)
     {
         cvox_rgba const color = scene->palette.color[i];
@@ -327,10 +351,22 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     cvox_destroy_scene(scene);
     return true;
 
+cleanup_grids:
+    vx_buffer_free(brick_grid);
+    vx_buffer_free(voxel_grid);
 cleanup_scene:
     assert(scene);
     cvox_destroy_scene(scene);
     return false;
+}
+
+static void vx_scene_free(vx_scene* const scene)
+{
+    assert(scene);
+    vx_buffer_free(scene->brick_grid);
+    vx_buffer_free(scene->voxel_grid);
+    scene->brick_grid = (vx_buffer(uint8_t)){0};
+    scene->voxel_grid = (vx_buffer(uint8_t)){0};
 }
 
 static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* const buffer,
@@ -569,6 +605,7 @@ typedef struct vxray
     // GPU
     SDL_GPUGraphicsPipeline* pipeline;
     SDL_GPUTexture*          voxel_texture;
+    SDL_GPUTexture*          brick_texture;
     SDL_GPUBuffer*           palette_buffer;
 } vxray;
 
@@ -655,7 +692,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 0,
-                                                 .num_storage_textures = 1,
+                                                 .num_storage_textures = 2,
                                                  .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -720,7 +757,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             {
                 return SDL_APP_FAILURE;
             }
-            assert(scene.grid.ptr);
+            assert(scene.voxel_grid.ptr);
             assert(scene.grid_ext);
             vxray_instance.grid_ext = scene.grid_ext;
         }
@@ -734,12 +771,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             {
                 SDL_LogError(SDL_LOG_CATEGORY_GPU,
                              "TEXTUREFORMAT_R8_UINT not supported on this device");
-                vx_buffer_free(scene.grid);
+                vx_scene_free(&scene);
                 return SDL_APP_FAILURE;
             }
 
             {
-                uint32_t const        voxel_buffer_size = (uint32_t)scene.grid.count;
+                uint32_t const        voxel_buffer_size = (uint32_t)scene.voxel_grid.count;
                 SDL_GPUTexture* const voxel_texture = SDL_CreateGPUTexture(
                     device,
                     &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
@@ -754,17 +791,43 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel texture: %s",
                                  SDL_GetError());
-                    vx_buffer_free(scene.grid);
+                    vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
-                if (!vx_gpu_texture_upload(device, voxel_texture, scene.grid.ptr, voxel_buffer_size,
-                                           (uint32_t)scene.grid_ext))
+                if (!vx_gpu_texture_upload(device, voxel_texture, scene.voxel_grid.ptr,
+                                           voxel_buffer_size, (uint32_t)scene.grid_ext))
                 {
-                    SDL_ReleaseGPUTexture(device, voxel_texture);
-                    vx_buffer_free(scene.grid);
+                    vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
                 vxray_instance.voxel_texture = voxel_texture;
+            }
+            {
+                uint32_t const        brick_grid_size = (uint32_t)scene.brick_grid.count;
+                SDL_GPUTexture* const brick_texture = SDL_CreateGPUTexture(
+                    device,
+                    &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                                .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                                .width = scene.brick_grid_ext,
+                                                .height = scene.brick_grid_ext,
+                                                .layer_count_or_depth = scene.brick_grid_ext,
+                                                .num_levels = 1,
+                                                .sample_count = SDL_GPU_SAMPLECOUNT_1});
+                if (!brick_texture)
+                {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create brick grid texture: %s",
+                                 SDL_GetError());
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                if (!vx_gpu_texture_upload(device, brick_texture, scene.brick_grid.ptr,
+                                           brick_grid_size, (uint32_t)scene.brick_grid_ext))
+                {
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                vxray_instance.brick_texture = brick_texture;
             }
             {
                 uint32_t const palette_size = 4 * 256;
@@ -777,20 +840,20 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create palette buffer: %s",
                                  SDL_GetError());
-                    vx_buffer_free(scene.grid);
+                    vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
                 if (!vx_gpu_buffer_upload(device, palette_buffer, scene.palette, palette_size))
                 {
                     SDL_ReleaseGPUBuffer(device, palette_buffer);
-                    vx_buffer_free(scene.grid);
+                    vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
 
                 vxray_instance.palette_buffer = palette_buffer;
             }
 
-            vx_buffer_free(scene.grid);
+            vx_scene_free(&scene);
         }
 
         if (argc == 3)
@@ -908,8 +971,15 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(render_pass);
 
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.pipeline);
-    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, &vxray_instance.palette_buffer, 1);
-    SDL_BindGPUFragmentStorageTextures(render_pass, 0, &vxray_instance.voxel_texture, 1);
+    SDL_GPUTexture* textures[] = {
+        vxray_instance.voxel_texture,
+        vxray_instance.brick_texture,
+    };
+    SDL_BindGPUFragmentStorageTextures(render_pass, 0, textures, SDL_arraysize(textures));
+    SDL_GPUBuffer* buffers[] = {
+        vxray_instance.palette_buffer,
+    };
+    SDL_BindGPUFragmentStorageBuffers(render_pass, 0, buffers, SDL_arraysize(buffers));
 
     float3 right = {0};
     float3 up = {0};
@@ -943,6 +1013,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.palette_buffer);
         vxray_instance.palette_buffer = 0;
+    }
+
+    if (vxray_instance.brick_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.brick_texture);
+        vxray_instance.brick_texture = 0;
     }
 
     if (vxray_instance.voxel_texture)

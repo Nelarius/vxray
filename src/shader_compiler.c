@@ -15,7 +15,7 @@
 
 #define MAX_PATH_LENGTH 512
 #define MAX_SYMBOL_LENGTH 256
-#define MAX_SHADER_LENGTH (1 << 13) // 8 KiB
+#define MAX_SHADER_LENGTH (1 << 15) // 32 KiB
 #define MAX_COMMAND_LENGTH 1024
 
 typedef struct compiled_shader

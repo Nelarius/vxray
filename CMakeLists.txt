@@ -31,7 +31,9 @@ add_custom_command(
         ${VXRAY_SHADER_SOURCES}
         COMMENT "Compiling HLSL shaders..."
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        DEPENDS ${VXRAY_SHADER_SOURCES})
+        DEPENDS ${VXRAY_SHADER_SOURCES}
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/constants.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/dda.h)
 add_custom_target(compile-vxray-shaders DEPENDS ${VXRAY_COMPILED_METAL_SHADERS_C} ${VXRAY_COMPILED_SPIRV_SHADERS_C})
 add_dependencies(compile-vxray-shaders shader-compiler)
 
@@ -40,6 +42,7 @@ set(VXRAY_SOURCES
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.h>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.c>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
+        constants.h
         cvox.cc
         cvox.h
         dda.h

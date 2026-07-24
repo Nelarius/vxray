@@ -1,3 +1,4 @@
+#include "constants.h"
 #include "dda.h"
 
 struct ps_input
@@ -8,7 +9,8 @@ struct ps_input
 ConstantBuffer<dda_uniforms> uniforms : register(b0, space3);
 
 Texture3D<uint>        voxels : register(t0, space2);
-StructuredBuffer<uint> palette_rgba : register(t1, space2);
+Texture3D<uint>        bricks : register(t1, space2);
+StructuredBuffer<uint> palette_rgba : register(t2, space2);
 
 float3 unpack_rgba(uint const rgba)
 {
@@ -19,6 +21,8 @@ float3 unpack_rgba(uint const rgba)
 }
 
 uint voxel_at(int3 const p) { return voxels.Load(int4(p, 0)).r; }
+
+uint brick_at(int3 const p) { return bricks.Load(int4(p, 0)).r; }
 
 bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
                   float3 const p1, out float tmin, out float tmax)
@@ -34,37 +38,22 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     return tmin <= tmax;
 }
 
-// Good insight into DDA: https://news.ycombinator.com/item?id=43599990
-
-uint dda(float3 const origin, float3 const dir)
+uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
+                 float3 const inv_abs_dir, int3 const brick_cell)
 {
-    float3 const inv_dir = 1.0 / dir;
-    float3 const inv_abs_dir = abs(inv_dir);
-
-    // Ray-bounds test
-
-    float tmin;
-    float tmax;
+    float      tmin;
+    float      tmax;
+    int3 const brick_min = brick_cell * VX_BRICK_EXT;
+    int const  max_idx = uniforms.grid_ext - 1;
+    int3 const min_cell = brick_min;
+    int3 const max_cell = min(brick_min + VX_BRICK_EXT - 1, int3(max_idx, max_idx, max_idx));
+    if (!ray_box_test(origin, inv_dir, float3(min_cell), float3(max_cell + 1), tmin, tmax))
     {
-        float const  ext = (float)uniforms.grid_ext;
-        float3 const bmin = float3(0.0, 0.0, 0.0);
-        float3 const bmax = float3(ext, ext, ext);
-        if (!ray_box_test(origin, 1.0 / dir, bmin, bmax, tmin, tmax))
-        {
-            return 0u;
-        }
+        return 0u;
     }
 
-    // Calculate the number of steps along the ray
-
     float3 const entry = origin + tmin * dir;
-    int const    max_idx = uniforms.grid_ext - 1;
-    int3 const   min_cell = int3(0, 0, 0);
-    int3 const   max_cell = int3(max_idx, max_idx, max_idx);
     int3 const   start_cell = clamp(int3(entry), min_cell, max_cell);
-
-    // Initialize traversal vectors
-
     float3 const s = sign(dir);
     int3 const   step_dir = int3(s);
     float3 const next = float3(start_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0));
@@ -75,9 +64,7 @@ uint dda(float3 const origin, float3 const dir)
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
     float3 const tdelta = inv_abs_dir;
 
-    // Trace voxels
-
-    for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
+    for (int i = 0; i < 3 * VX_BRICK_EXT; ++i)
     {
         if (any(cell < min_cell) || any(cell > max_cell))
         {
@@ -95,6 +82,64 @@ uint dda(float3 const origin, float3 const dir)
         float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
         tnext += axis_mask * tdelta;
         cell += int3(axis_mask) * step_dir;
+    }
+
+    return 0u;
+}
+
+// Good insight into DDA: https://news.ycombinator.com/item?id=43599990
+
+uint dda(float3 const origin, float3 const dir)
+{
+    float3 const inv_dir = 1.0 / dir;
+    float3 const inv_abs_dir = abs(inv_dir);
+
+    float       tmin;
+    float       tmax;
+    float const ext = (float)uniforms.grid_ext;
+    if (!ray_box_test(origin, inv_dir, float3(0.0, 0.0, 0.0), float3(ext, ext, ext), tmin, tmax))
+    {
+        return 0u;
+    }
+
+    float3 const entry = origin + tmin * dir;
+    int const    max_brick_idx = (uniforms.grid_ext - 1) / VX_BRICK_EXT;
+    int3 const   min_brick_cell = int3(0, 0, 0);
+    int3 const   max_brick_cell = int3(max_brick_idx, max_brick_idx, max_brick_idx);
+    int3 brick_cell = clamp(int3(entry / (float)VX_BRICK_EXT), min_brick_cell, max_brick_cell);
+
+    float3 const s = sign(dir);
+    int3 const   step_dir = int3(s);
+    float3 const next =
+        (float3(brick_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0))) * VX_BRICK_EXT;
+    float3 tnext = (next - entry) * inv_dir;
+    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
+    tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
+    tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
+    float3 const tdelta = (float)VX_BRICK_EXT * inv_abs_dir;
+    int const    brick_grid_ext = max_brick_idx + 1;
+
+    for (int i = 0; i < 3 * brick_grid_ext; ++i)
+    {
+        if (any(brick_cell < min_brick_cell) || any(brick_cell > max_brick_cell))
+        {
+            return 0u;
+        }
+
+        if (brick_at(brick_cell) > 0u)
+        {
+            uint const voxel = trace_brick(origin, dir, inv_dir, inv_abs_dir, brick_cell);
+            if (voxel > 0u)
+            {
+                return voxel;
+            }
+        }
+
+        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
+        // step(a, x) like a < x.
+        float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
+        tnext += axis_mask * tdelta;
+        brick_cell += int3(axis_mask) * step_dir;
     }
 
     return 0u;
