@@ -102,7 +102,6 @@ uint dda(float3 const origin, float3 const dir)
         return 0u;
     }
 
-    // Traverse macro cells first, only running the voxel DDA for occupied cells.
     float3 const entry = origin + tmin * dir;
     int const    max_macro_idx = (uniforms.grid_ext - 1) / VX_MACRO_CELL_EXT;
     int3 const   min_macro_cell = int3(0, 0, 0);
