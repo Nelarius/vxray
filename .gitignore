@@ -3,6 +3,7 @@
 build*/
 traces/
 locations/
+*.vox
 
 ### CMake ###
 CMakeLists.txt.user
