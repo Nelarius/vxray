@@ -15,7 +15,10 @@ FetchContent_Declare(sdl3
 FetchContent_Declare(sdl-shadercross
                      GIT_REPOSITORY "https://github.com/libsdl-org/SDL_shadercross"
                      GIT_TAG 9a461644308366b50f0c364069d762be8e3b3443 # Jun 15, 2026
-                     GIT_SHALLOW OFF)
+                     GIT_SHALLOW OFF
+                     PATCH_COMMAND
+                         git apply
+                         ${CMAKE_CURRENT_SOURCE_DIR}/patches/sdl-shadercross-preserve-deployment-target.patch)
 
 # Fetch
 

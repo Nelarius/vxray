@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 
+if(CMAKE_GENERATOR STREQUAL "Xcode" AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET 12.0)
+endif()
+
 project(vxray C CXX)
 
 set(CMAKE_C_STANDARD 11)
