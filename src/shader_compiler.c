@@ -322,7 +322,7 @@ static bool write_output(output_info const* const info)
             fprintf(c_file, "0x%02x", byte);
             if (byte_index + 1 < array_size)
             {
-                fprintf(c_file, ", ");
+                fprintf(c_file, byte_index % 16 == 15 ? "," : ", ");
             }
         }
         fprintf(c_file, "\n};\n");
