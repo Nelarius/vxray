@@ -992,7 +992,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                    .viewport = {(float)width, (float)height, 60.f, 0.f},
                                    .grid_ext = vxray_instance.grid_ext};
     SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &uniforms, sizeof(dda_uniforms));
-    SDL_DrawGPUPrimitives(render_pass, 6, 1, 0, 0);
+    SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(render_pass);
     if (!SDL_SubmitGPUCommandBuffer(cmd_buffer))
     {
