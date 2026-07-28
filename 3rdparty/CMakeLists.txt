@@ -2,6 +2,8 @@ include(FetchContent)
 
 # Declare
 
+find_package(Git REQUIRED)
+
 FetchContent_Declare(ogt
                      GIT_REPOSITORY "https://github.com/jpaver/opengametools"
                      GIT_TAG dcabf82345979a2d937a5ea29a0b14683a3aa838 # Mar 20, 2026
@@ -17,8 +19,12 @@ FetchContent_Declare(sdl-shadercross
                      GIT_TAG 9a461644308366b50f0c364069d762be8e3b3443 # Jun 15, 2026
                      GIT_SHALLOW OFF
                      PATCH_COMMAND
-                         git apply
-                         ${CMAKE_CURRENT_SOURCE_DIR}/patches/sdl-shadercross-preserve-deployment-target.patch)
+                         ${CMAKE_COMMAND}
+                         "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+                         "-DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/sdl-shadercross-preserve-deployment-target.patch"
+                         "-DSOURCE_DIR=<SOURCE_DIR>"
+                         -P
+                         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply-patch.cmake")
 
 # Fetch
 
