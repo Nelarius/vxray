@@ -4,6 +4,11 @@ include(FetchContent)
 
 find_package(Git REQUIRED)
 
+FetchContent_Declare(cimgui
+                     GIT_REPOSITORY "https://github.com/cimgui/cimgui"
+                     GIT_TAG d298666861ebf00dcfeb2407409931c04e47e33c # May 30, 2026
+                     GIT_SHALLOW OFF)
+
 FetchContent_Declare(ogt
                      GIT_REPOSITORY "https://github.com/jpaver/opengametools"
                      GIT_TAG dcabf82345979a2d937a5ea29a0b14683a3aa838 # Mar 20, 2026
@@ -27,6 +32,10 @@ FetchContent_Declare(sdl-shadercross
                          "${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply-patch.cmake")
 
 # Fetch
+
+set(IMGUI_STATIC ON CACHE STRING "" FORCE)
+message(STATUS "Fetching cimgui...")
+FetchContent_MakeAvailable(cimgui)
 
 message(STATUS "Fetching opengametools...")
 FetchContent_MakeAvailable(ogt)
