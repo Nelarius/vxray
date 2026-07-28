@@ -489,7 +489,6 @@ typedef struct vx_camera
     float3 position;
     float  yaw;
     float  pitch;
-    bool   mouse_dragging;
 } vx_camera;
 
 static void vx_camera_print_code(vx_camera const* const camera)
@@ -589,6 +588,19 @@ static void vx_camera_update_movement(vx_camera* const camera)
     }
 }
 
+enum
+{
+    VX_INPUT_POINTER_DOWN = 1u << 0,
+    VX_INPUT_POINTER_PRESSED = 1u << 1,
+    VX_INPUT_POINTER_UP = 1u << 2,
+};
+
+typedef struct vx_input
+{
+    unsigned int pointer_events;
+    float        pointer_delta[2];
+} vx_input;
+
 typedef struct vxray
 {
     // Platform
@@ -598,6 +610,7 @@ typedef struct vxray
 
     // Camera
     vx_camera camera;
+    vx_input  input;
 
     // Voxel grid
     int grid_ext;
@@ -890,30 +903,17 @@ SDL_AppResult SDL_AppEvent(void* const appstate, SDL_Event* const event)
     }
     if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && event->button.button == SDL_BUTTON_LEFT)
     {
-        vxray_instance.camera.mouse_dragging = true;
-        if (!SDL_SetWindowRelativeMouseMode(vxray_instance.window, true))
-        {
-            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't enable relative mouse mode: %s",
-                        SDL_GetError());
-        }
+        vxray_instance.input.pointer_events |= VX_INPUT_POINTER_DOWN | VX_INPUT_POINTER_PRESSED;
     }
     if (event->type == SDL_EVENT_MOUSE_BUTTON_UP && event->button.button == SDL_BUTTON_LEFT)
     {
-        vxray_instance.camera.mouse_dragging = false;
-        if (!SDL_SetWindowRelativeMouseMode(vxray_instance.window, false))
-        {
-            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't disable relative mouse mode: %s",
-                        SDL_GetError());
-        }
+        vxray_instance.input.pointer_events |= VX_INPUT_POINTER_UP;
+        vxray_instance.input.pointer_events &= ~VX_INPUT_POINTER_PRESSED;
     }
-    if (event->type == SDL_EVENT_MOUSE_MOTION && vxray_instance.camera.mouse_dragging)
+    if (event->type == SDL_EVENT_MOUSE_MOTION)
     {
-        vx_camera* const camera = &vxray_instance.camera;
-        float const      mouse_sensitivity = 0.003f;
-        float const      pitch_limit = 1.55334306f;
-        camera->yaw += (float)event->motion.xrel * mouse_sensitivity;
-        camera->pitch = SDL_clamp(camera->pitch - (float)event->motion.yrel * mouse_sensitivity,
-                                  -pitch_limit, pitch_limit);
+        vxray_instance.input.pointer_delta[0] += (float)event->motion.xrel;
+        vxray_instance.input.pointer_delta[1] += (float)event->motion.yrel;
     }
 
     return SDL_APP_CONTINUE;
@@ -926,7 +926,54 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPUDevice* const gpu_device = vxray_instance.gpu_device;
     SDL_Window* const    window = vxray_instance.window;
     vx_camera* const     camera = &vxray_instance.camera;
+    vx_input* const      input = &vxray_instance.input;
+
+    //
+    // Input
+    //
+
+    if (input->pointer_events & VX_INPUT_POINTER_DOWN)
+    {
+        if (!SDL_SetWindowRelativeMouseMode(window, true))
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't enable relative mouse mode: %s",
+                        SDL_GetError());
+        }
+    }
+    if (input->pointer_events & VX_INPUT_POINTER_UP)
+    {
+        if (!SDL_SetWindowRelativeMouseMode(window, false))
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Couldn't disable relative mouse mode: %s",
+                        SDL_GetError());
+        }
+    }
+    if (input->pointer_events & VX_INPUT_POINTER_PRESSED)
+    {
+        float const mouse_sensitivity = 0.003f;
+        float const pitch_limit = 1.55334306f;
+        camera->yaw -= input->pointer_delta[0] * mouse_sensitivity;
+        camera->pitch = SDL_clamp(camera->pitch - input->pointer_delta[1] * mouse_sensitivity,
+                                  -pitch_limit, pitch_limit);
+    }
+
+    //
+    // Camera
+    //
+
     vx_camera_update_movement(camera);
+
+    //
+    // Reset input state
+    //
+
+    input->pointer_events &= VX_INPUT_POINTER_PRESSED;
+    input->pointer_delta[0] = 0.f;
+    input->pointer_delta[1] = 0.f;
+
+    //
+    // Render
+    //
 
     SDL_GPUCommandBuffer* const cmd_buffer = SDL_AcquireGPUCommandBuffer(gpu_device);
     if (!cmd_buffer)
