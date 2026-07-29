@@ -4,6 +4,7 @@ build*/
 traces/
 locations/
 *.vox
+imgui.ini
 
 ### CMake ###
 CMakeLists.txt.user

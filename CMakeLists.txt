@@ -41,6 +41,22 @@ add_custom_command(
 add_custom_target(compile-vxray-shaders DEPENDS ${VXRAY_COMPILED_METAL_SHADERS_C} ${VXRAY_COMPILED_SPIRV_SHADERS_C})
 add_dependencies(compile-vxray-shaders shader-compiler)
 
+add_library(
+        vxray-imgui STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/integrations/imgui_sdl3.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/integrations/imgui_sdl3.h
+        ${cimgui_SOURCE_DIR}/imgui/backends/imgui_impl_sdl3.cpp
+        ${cimgui_SOURCE_DIR}/imgui/backends/imgui_impl_sdlgpu3.cpp)
+target_include_directories(
+        vxray-imgui
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/integrations
+        PRIVATE ${cimgui_SOURCE_DIR}/imgui/backends)
+target_link_libraries(vxray-imgui PUBLIC cimgui PRIVATE SDL3::SDL3-static)
+target_compile_options(
+        vxray-imgui
+        PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fno-exceptions>
+                $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/EHsc->)
+
 set(VXRAY_SOURCES
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.c>
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.h>
@@ -57,7 +73,8 @@ set(VXRAY_SOURCES
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 add_executable(vxray ${VXRAY_SOURCES})
-target_link_libraries(vxray PRIVATE ogt SDL3::SDL3-static)
+target_link_libraries(vxray PRIVATE ogt SDL3::SDL3-static vxray-imgui)
+target_compile_definitions(vxray PRIVATE CIMGUI_DEFINE_ENUMS_AND_STRUCTS=1)
 target_compile_options(
         vxray
         PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fno-exceptions>

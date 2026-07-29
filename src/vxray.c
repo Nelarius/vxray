@@ -3,6 +3,9 @@
 #include "dda.h"
 #include "hlsl_shim.h"
 
+#include <cimgui.h>
+#include <imgui_sdl3.h>
+
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
@@ -687,6 +690,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
+    if (!imgui_sdl3_init(vxray_instance.gpu_device, vxray_instance.window))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't initialize ImGui: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
     // Graphics pipeline
 
     {
@@ -892,28 +901,40 @@ SDL_AppResult SDL_AppEvent(void* const appstate, SDL_Event* const event)
 {
     (void)appstate;
 
+    imgui_sdl3_process_event(event);
+
     if (event->type == SDL_EVENT_QUIT)
     {
         return SDL_APP_SUCCESS;
     }
-    if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
-        event->key.scancode == SDL_SCANCODE_F2)
+
+    if (!imgui_sdl3_wants_capture_keyboard())
     {
-        vx_camera_print_code(&vxray_instance.camera);
+        if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
+            event->key.scancode == SDL_SCANCODE_F2)
+        {
+            vx_camera_print_code(&vxray_instance.camera);
+        }
     }
-    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && event->button.button == SDL_BUTTON_LEFT)
+
+    bool const application_has_mouse_capture =
+        (vxray_instance.input.pointer_events & VX_INPUT_POINTER_PRESSED) != 0;
+    if (!imgui_sdl3_wants_capture_mouse() || application_has_mouse_capture)
     {
-        vxray_instance.input.pointer_events |= VX_INPUT_POINTER_DOWN | VX_INPUT_POINTER_PRESSED;
-    }
-    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP && event->button.button == SDL_BUTTON_LEFT)
-    {
-        vxray_instance.input.pointer_events |= VX_INPUT_POINTER_UP;
-        vxray_instance.input.pointer_events &= ~VX_INPUT_POINTER_PRESSED;
-    }
-    if (event->type == SDL_EVENT_MOUSE_MOTION)
-    {
-        vxray_instance.input.pointer_delta[0] += (float)event->motion.xrel;
-        vxray_instance.input.pointer_delta[1] += (float)event->motion.yrel;
+        if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && event->button.button == SDL_BUTTON_LEFT)
+        {
+            vxray_instance.input.pointer_events |= VX_INPUT_POINTER_DOWN | VX_INPUT_POINTER_PRESSED;
+        }
+        if (event->type == SDL_EVENT_MOUSE_BUTTON_UP && event->button.button == SDL_BUTTON_LEFT)
+        {
+            vxray_instance.input.pointer_events |= VX_INPUT_POINTER_UP;
+            vxray_instance.input.pointer_events &= ~VX_INPUT_POINTER_PRESSED;
+        }
+        if (event->type == SDL_EVENT_MOUSE_MOTION)
+        {
+            vxray_instance.input.pointer_delta[0] += (float)event->motion.xrel;
+            vxray_instance.input.pointer_delta[1] += (float)event->motion.yrel;
+        }
     }
 
     return SDL_APP_CONTINUE;
@@ -961,7 +982,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     // Camera
     //
 
-    vx_camera_update_movement(camera);
+    if (!imgui_sdl3_wants_capture_keyboard())
+    {
+        vx_camera_update_movement(camera);
+    }
 
     //
     // Reset input state
@@ -974,6 +998,12 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     //
     // Render
     //
+
+    imgui_sdl3_new_frame();
+    igBegin("Hello, world", 0, 0);
+    igText("Hello, world");
+    igEnd();
+    igRender();
 
     SDL_GPUCommandBuffer* const cmd_buffer = SDL_AcquireGPUCommandBuffer(gpu_device);
     if (!cmd_buffer)
@@ -1009,6 +1039,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         return SDL_APP_CONTINUE;
     }
 
+    imgui_sdl3_prepare_draw_data(cmd_buffer);
+
     SDL_GPUColorTargetInfo const color_target_info = {.texture = swapchain_texture,
                                                       .clear_color =
                                                           (SDL_FColor){0.f, 0.f, 0.f, 0.f},
@@ -1040,6 +1072,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                    .grid_ext = vxray_instance.grid_ext};
     SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &uniforms, sizeof(dda_uniforms));
     SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
+    imgui_sdl3_render_draw_data(cmd_buffer, render_pass);
     SDL_EndGPURenderPass(render_pass);
     if (!SDL_SubmitGPUCommandBuffer(cmd_buffer))
     {
@@ -1055,6 +1088,8 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
 {
     (void)appstate;
     (void)result;
+
+    imgui_sdl3_shutdown();
 
     if (vxray_instance.palette_buffer)
     {
