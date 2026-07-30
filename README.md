@@ -4,9 +4,11 @@
  ▀█▀  ██ ██ ██ ██ ██▀██   █   
 ```
 
-Configuring and building the project requires [CMake](https://cmake.org) and [Metal Developer Tools](https://developer.apple.com/metal/tools/).
+Experimental voxel rendering with the DDA algorithm. Read the [devlog](https://nelari.us/post/voxel-ray-tracing/).
 
 ## Configure and Build
+
+Configuring and building the project requires [CMake](https://cmake.org) and [Metal Developer Tools](https://developer.apple.com/metal/tools/).
 
 **Basics**
 
@@ -58,3 +60,4 @@ pitch = 0
 ## References
 
 - _Ray Axis-Aligned Bounding Box Intersection_, [Ray Tracing Gems II](https://developer.nvidia.com/ray-tracing-gems-ii)
+- _Brancless Voxel Raycasting_, [Shadertoy](https://www.shadertoy.com/view/4dX3zl)
