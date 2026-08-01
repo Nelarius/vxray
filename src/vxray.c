@@ -259,7 +259,9 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             goto cleanup_scene;
         }
 
-        int const grid_ext = (int)vx_next_power_of_2((uint32_t)largest_extent);
+        int const padded_extent = SDL_max(largest_extent, VX_BRICK_EXT);
+        int const grid_ext = (int)vx_next_power_of_2((uint32_t)padded_extent);
+        assert(grid_ext % VX_BRICK_EXT == 0);
         int const total_voxels = grid_ext * grid_ext * grid_ext;
         assert(total_voxels % 4 == 0);
         voxel_grid = vx_buffer_calloc(uint8_t, total_voxels);
@@ -269,7 +271,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             goto cleanup_scene;
         }
 
-        int const brick_grid_ext = (grid_ext + VX_BRICK_EXT - 1) / VX_BRICK_EXT;
+        int const brick_grid_ext = grid_ext / VX_BRICK_EXT;
         int const total_bricks = brick_grid_ext * brick_grid_ext * brick_grid_ext;
         brick_grid = vx_buffer_calloc(uint8_t, total_bricks);
         if (!brick_grid.ptr)

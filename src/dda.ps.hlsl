@@ -38,8 +38,8 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     return tmin <= tmax;
 }
 
-float3 aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
-                           float3 const p1)
+float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
+                          float3 const p1)
 {
     float3 const t0 = (p0 - ray_origin) * inv_ray_dir;
     float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
@@ -50,30 +50,28 @@ float3 aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, fl
 uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
                  int3 const brick_cell)
 {
-    int3 const brick_min = brick_cell * VX_BRICK_EXT;
-    int const  max_idx = uniforms.grid_ext - 1;
-    int3 const min_cell = brick_min;
-    int3 const max_cell = min(brick_min + VX_BRICK_EXT - 1, int3(max_idx, max_idx, max_idx));
-
-    float3 const t = aabb_entry_distance(origin, inv_dir, float3(min_cell), float3(max_cell + 1));
-    float3 const entry = origin + t * dir;
-    int3 const   start_cell = clamp(int3(entry), min_cell, max_cell);
+    int3 const  brick_min = brick_cell * VX_BRICK_EXT;
+    float const t =
+        aabb_entry_distance(origin, inv_dir, float3(brick_min),
+                            float3(brick_min + int3(VX_BRICK_EXT, VX_BRICK_EXT, VX_BRICK_EXT)));
+    float3 const local_entry = origin + t * dir - float3(brick_min);
+    int3         local_cell = clamp(int3(local_entry), int3(0, 0, 0),
+                                    int3(VX_BRICK_EXT - 1, VX_BRICK_EXT - 1, VX_BRICK_EXT - 1));
     float3 const s = sign(dir);
     int3 const   step_dir = int3(s);
-    float3 const next = float3(start_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0));
-    int3         cell = start_cell;
-    float3       tnext = (next - entry) * inv_dir;
+    float3 const next = float3(local_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0));
+    float3       tnext = (next - local_entry) * inv_dir;
     tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
     for (int i = 0; i < 3 * VX_BRICK_EXT; ++i)
     {
-        if (any(cell < min_cell) || any(cell > max_cell))
+        if (any((uint3)local_cell >= (uint)VX_BRICK_EXT))
         {
             return 0u;
         }
 
-        uint const v = voxel_at(cell);
+        uint const v = voxel_at(brick_min + local_cell);
         if (v > 0u)
         {
             return v;
@@ -83,7 +81,7 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
         // step(a, x) like a < x.
         float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
         tnext += axis_mask * tdelta;
-        cell += int3(axis_mask) * step_dir;
+        local_cell += int3(axis_mask) * step_dir;
     }
 
     return 0u;
@@ -105,10 +103,9 @@ uint dda(float3 const origin, float3 const dir)
     }
 
     float3 const entry = origin + tmin * dir;
-    int const    max_brick_idx = (uniforms.grid_ext - 1) / VX_BRICK_EXT;
-    int3 const   min_brick_cell = int3(0, 0, 0);
-    int3 const   max_brick_cell = int3(max_brick_idx, max_brick_idx, max_brick_idx);
-    int3 brick_cell = clamp(int3(entry / (float)VX_BRICK_EXT), min_brick_cell, max_brick_cell);
+    int const    brick_grid_ext = uniforms.grid_ext / VX_BRICK_EXT;
+    int3 brick_cell = clamp(int3(entry / (float)VX_BRICK_EXT), int3(0, 0, 0),
+                            int3(brick_grid_ext - 1, brick_grid_ext - 1, brick_grid_ext - 1));
 
     float3 const s = sign(dir);
     int3 const   step_dir = int3(s);
@@ -118,11 +115,10 @@ uint dda(float3 const origin, float3 const dir)
     tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
-    int const brick_grid_ext = max_brick_idx + 1;
 
     for (int i = 0; i < 3 * brick_grid_ext; ++i)
     {
-        if (any(brick_cell < min_brick_cell) || any(brick_cell > max_brick_cell))
+        if (any((uint3)brick_cell >= (uint)brick_grid_ext))
         {
             return 0u;
         }
@@ -148,9 +144,7 @@ uint dda(float3 const origin, float3 const dir)
 
 float4 main(ps_input const input) : SV_Target0
 {
-    float2 const pixel = input.uv * uniforms.viewport.xy;
-    float2 const ndc = float2((pixel.x / uniforms.viewport.x) * 2.0 - 1.0,
-                              1.0 - (pixel.y / uniforms.viewport.y) * 2.0);
+    float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
 
     float3 const dir = normalize(uniforms.camera_forward.xyz + uniforms.camera_right.xyz * ndc.x +
                                  uniforms.camera_up.xyz * ndc.y);
