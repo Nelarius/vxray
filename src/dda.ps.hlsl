@@ -152,13 +152,8 @@ float4 main(ps_input const input) : SV_Target0
     float2 const ndc = float2((pixel.x / uniforms.viewport.x) * 2.0 - 1.0,
                               1.0 - (pixel.y / uniforms.viewport.y) * 2.0);
 
-    float const aspect = uniforms.viewport.x / uniforms.viewport.y;
-    float const fov = radians(uniforms.viewport.z);
-    float const scale = tan(fov * 0.5);
-
-    float3 const dir =
-        normalize(uniforms.camera_forward.xyz + uniforms.camera_right.xyz * ndc.x * aspect * scale +
-                  uniforms.camera_up.xyz * ndc.y * scale);
+    float3 const dir = normalize(uniforms.camera_forward.xyz + uniforms.camera_right.xyz * ndc.x +
+                                 uniforms.camera_up.xyz * ndc.y);
 
     uint const palette_idx = dda(uniforms.camera_pos.xyz, dir);
     if (palette_idx > 0u)

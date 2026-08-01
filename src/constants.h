@@ -1,3 +1,6 @@
 #pragma once
 
+#define VX_DEGREES_TO_RADIANS 0.01745329f
+#define VX_RADIANS_TO_DEGREES 57.29578f
+
 #define VX_BRICK_EXT 8

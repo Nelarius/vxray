@@ -1060,17 +1060,24 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     };
     SDL_BindGPUFragmentStorageBuffers(render_pass, 0, buffers, SDL_arraysize(buffers));
 
-    float3 right = {0};
-    float3 up = {0};
-    float3 forward = {0};
-    vx_camera_basis(camera, &right, &up, &forward);
-    dda_uniforms const uniforms = {.camera_pos = vx_float4_from_float3(camera->position, 0.f),
-                                   .camera_right = vx_float4_from_float3(right, 0.f),
-                                   .camera_up = vx_float4_from_float3(up, 0.f),
-                                   .camera_forward = vx_float4_from_float3(forward, 0.f),
-                                   .viewport = {(float)width, (float)height, 60.f, 0.f},
-                                   .grid_ext = vxray_instance.grid_ext};
-    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &uniforms, sizeof(dda_uniforms));
+    {
+        float3 right = {0};
+        float3 up = {0};
+        float3 forward = {0};
+        vx_camera_basis(camera, &right, &up, &forward);
+        float const aspect = (float)width / (float)height;
+        float const fov = VX_DEGREES_TO_RADIANS * 60.f;
+        float const scale = tanf(0.5f * fov);
+        right = vx_float3_scale(right, scale * aspect);
+        up = vx_float3_scale(up, scale);
+        dda_uniforms const uniforms = {.camera_pos = vx_float4_from_float3(camera->position, 0.f),
+                                       .camera_right = vx_float4_from_float3(right, 0.f),
+                                       .camera_up = vx_float4_from_float3(up, 0.f),
+                                       .camera_forward = vx_float4_from_float3(forward, 0.f),
+                                       .viewport = {(float)width, (float)height},
+                                       .grid_ext = vxray_instance.grid_ext};
+        SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &uniforms, sizeof(dda_uniforms));
+    }
     SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
     imgui_sdl3_render_draw_data(cmd_buffer, render_pass);
     SDL_EndGPURenderPass(render_pass);
