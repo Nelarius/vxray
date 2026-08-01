@@ -38,8 +38,8 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     return tmin <= tmax;
 }
 
-uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
-                 float3 const inv_abs_dir, int3 const brick_cell)
+uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
+                 int3 const brick_cell)
 {
     float      tmin;
     float      tmax;
@@ -62,8 +62,6 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
     tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
-    float3 const tdelta = inv_abs_dir;
-
     for (int i = 0; i < 3 * VX_BRICK_EXT; ++i)
     {
         if (any(cell < min_cell) || any(cell > max_cell))
@@ -92,7 +90,7 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
 uint dda(float3 const origin, float3 const dir)
 {
     float3 const inv_dir = 1.0 / dir;
-    float3 const inv_abs_dir = abs(inv_dir);
+    float3 const tdelta = abs(inv_dir);
 
     float       tmin;
     float       tmax;
@@ -112,12 +110,11 @@ uint dda(float3 const origin, float3 const dir)
     int3 const   step_dir = int3(s);
     float3 const next =
         (float3(brick_cell) + max(float3(step_dir), float3(0.0, 0.0, 0.0))) * VX_BRICK_EXT;
-    float3 tnext = (next - entry) * inv_dir;
+    float3 tnext = (next - entry) * inv_dir / (float)VX_BRICK_EXT;
     tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
-    float3 const tdelta = (float)VX_BRICK_EXT * inv_abs_dir;
-    int const    brick_grid_ext = max_brick_idx + 1;
+    int const brick_grid_ext = max_brick_idx + 1;
 
     for (int i = 0; i < 3 * brick_grid_ext; ++i)
     {
@@ -128,7 +125,7 @@ uint dda(float3 const origin, float3 const dir)
 
         if (brick_at(brick_cell) > 0u)
         {
-            uint const voxel = trace_brick(origin, dir, inv_dir, inv_abs_dir, brick_cell);
+            uint const voxel = trace_brick(origin, dir, inv_dir, tdelta, brick_cell);
             if (voxel > 0u)
             {
                 return voxel;
