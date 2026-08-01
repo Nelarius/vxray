@@ -38,21 +38,25 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     return tmin <= tmax;
 }
 
+float3 aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
+                           float3 const p1)
+{
+    float3 const t0 = (p0 - ray_origin) * inv_ray_dir;
+    float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
+    float3 const lo = min(t0, t1);
+    return max(max(lo.x, lo.y), max(lo.z, 0.0));
+}
+
 uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
                  int3 const brick_cell)
 {
-    float      tmin;
-    float      tmax;
     int3 const brick_min = brick_cell * VX_BRICK_EXT;
     int const  max_idx = uniforms.grid_ext - 1;
     int3 const min_cell = brick_min;
     int3 const max_cell = min(brick_min + VX_BRICK_EXT - 1, int3(max_idx, max_idx, max_idx));
-    if (!ray_box_test(origin, inv_dir, float3(min_cell), float3(max_cell + 1), tmin, tmax))
-    {
-        return 0u;
-    }
 
-    float3 const entry = origin + tmin * dir;
+    float3 const t = aabb_entry_distance(origin, inv_dir, float3(min_cell), float3(max_cell + 1));
+    float3 const entry = origin + t * dir;
     int3 const   start_cell = clamp(int3(entry), min_cell, max_cell);
     float3 const s = sign(dir);
     int3 const   step_dir = int3(s);
