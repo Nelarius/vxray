@@ -5,8 +5,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+extern uint8_t const BRICK_QUAD_CS_BYTES[];
+extern size_t const BRICK_QUAD_CS_SIZE;
+
+extern uint8_t const BRICK_QUAD_PS_BYTES[];
+extern size_t const BRICK_QUAD_PS_SIZE;
+
+extern uint8_t const BRICK_QUAD_VS_BYTES[];
+extern size_t const BRICK_QUAD_VS_SIZE;
+
 extern uint8_t const DDA_PS_BYTES[];
 extern size_t const DDA_PS_SIZE;
 
 extern uint8_t const DDA_VS_BYTES[];
 extern size_t const DDA_VS_SIZE;
+
+extern uint8_t const DEPTH_VISUALIZE_PS_BYTES[];
+extern size_t const DEPTH_VISUALIZE_PS_SIZE;
