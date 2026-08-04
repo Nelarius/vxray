@@ -5,6 +5,7 @@ traces/
 locations/
 *.vox
 imgui.ini
+*.sublime-workspace
 
 ### CMake ###
 CMakeLists.txt.user

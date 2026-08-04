@@ -1,0 +1,65 @@
+{
+    "folders":
+    [
+        {
+            "path": ".",
+            "folder_exclude_patterns":
+            [
+                ".git",
+                ".idea",
+                "build*",
+                "cmake-build-*",
+                "traces",
+                "locations"
+            ]
+        }
+    ],
+    "settings":
+    {
+        "tab_size": 4,
+        "translate_tabs_to_spaces": true
+    },
+    "build_systems":
+    [
+        {
+            "name": "Vxray",
+            "cmd":
+            [
+                "cmake",
+                "--build",
+                "build",
+                "--target",
+                "vxray"
+            ],
+            "working_dir": "$project_path",
+            "file_regex": "^(.+?):([0-9]+):([0-9]+):\\s+(.*)$",
+            "variants":
+            [
+                {
+                    "name": "Configure Debug",
+                    "cmd":
+                    [
+                        "cmake",
+                        "-B",
+                        "build",
+                        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                        "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                        "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+                        "-DCMAKE_BUILD_TYPE=Debug"
+                    ]
+                },
+                {
+                    "name": "Compile Shaders",
+                    "cmd":
+                    [
+                        "cmake",
+                        "--build",
+                        "build",
+                        "--target",
+                        "compile-vxray-shaders"
+                    ]
+                }
+            ]
+        }
+    ]
+}
