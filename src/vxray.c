@@ -67,6 +67,7 @@
 #define vx_buffer_free(b) free((b).ptr)
 
 vx_buffer_decl(uint8_t);
+vx_buffer_decl(uint32_t);
 
 static uint32_t vx_next_power_of_2(uint32_t x)
 {
@@ -149,14 +150,14 @@ static float4 vx_float4_from_float3(float3 const v, float const w)
 typedef struct vx_scene
 {
     vx_buffer(uint8_t) voxel_grid;
-    vx_buffer(uint8_t) brick_grid;
+    vx_buffer(uint32_t) voxel_masks;
     uint   palette[256];
     int    grid_ext;
     int    brick_grid_ext;
     float3 center;
 } vx_scene;
 
-// Loads a MagicaVoxel scene into dense voxel and brick grids. Free both grids with
+// Loads a MagicaVoxel scene into a dense voxel grid and per-brick occupancy masks. Free both with
 // `vx_buffer_free`.
 static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 {
@@ -164,7 +165,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     assert(out_scene);
 
     vx_buffer(uint8_t) voxel_grid = {0};
-    vx_buffer(uint8_t) brick_grid = {0};
+    vx_buffer(uint32_t) voxel_masks = {0};
     cvox_scene const* scene = 0;
     {
         size_t   num_bytes;
@@ -273,10 +274,11 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 
         int const brick_grid_ext = grid_ext / VX_BRICK_EXT;
         int const total_bricks = brick_grid_ext * brick_grid_ext * brick_grid_ext;
-        brick_grid = vx_buffer_calloc(uint8_t, total_bricks);
-        if (!brick_grid.ptr)
+        int const total_mask_words = 2 * total_bricks;
+        voxel_masks = vx_buffer_calloc(uint32_t, total_mask_words);
+        if (!voxel_masks.ptr)
         {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate brick grid");
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate voxel masks");
             goto cleanup_grids;
         }
 
@@ -331,8 +333,17 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
                             int const brick_z = dz / VX_BRICK_EXT;
                             int const brick_idx =
                                 vx_grid_index(brick_x, brick_y, brick_z, brick_grid_ext);
-                            assert(brick_idx >= 0 && brick_idx < brick_grid.count);
-                            brick_grid.ptr[brick_idx] = 1;
+                            assert(brick_idx >= 0 && brick_idx < total_bricks);
+
+                            int const local_x = dx % VX_BRICK_EXT;
+                            int const local_y = dy % VX_BRICK_EXT;
+                            int const local_z = dz % VX_BRICK_EXT;
+                            int const voxel_idx = local_x + local_y * VX_BRICK_EXT +
+                                                  local_z * VX_BRICK_EXT * VX_BRICK_EXT;
+                            assert(voxel_idx >= 0 && voxel_idx < 64);
+                            int const mask_word_idx = 2 * brick_idx + voxel_idx / 32;
+                            assert(mask_word_idx >= 0 && mask_word_idx < voxel_masks.count);
+                            voxel_masks.ptr[mask_word_idx] |= 1u << (uint32_t)(voxel_idx % 32);
                         }
                     }
                 }
@@ -346,7 +357,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     }
 
     out_scene->voxel_grid = voxel_grid;
-    out_scene->brick_grid = brick_grid;
+    out_scene->voxel_masks = voxel_masks;
     for (int i = 0; i < 256; ++i)
     {
         cvox_rgba const color = scene->palette.color[i];
@@ -357,7 +368,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     return true;
 
 cleanup_grids:
-    vx_buffer_free(brick_grid);
+    vx_buffer_free(voxel_masks);
     vx_buffer_free(voxel_grid);
 cleanup_scene:
     assert(scene);
@@ -368,9 +379,9 @@ cleanup_scene:
 static void vx_scene_free(vx_scene* const scene)
 {
     assert(scene);
-    vx_buffer_free(scene->brick_grid);
+    vx_buffer_free(scene->voxel_masks);
     vx_buffer_free(scene->voxel_grid);
-    scene->brick_grid = (vx_buffer(uint8_t)){0};
+    scene->voxel_masks = (vx_buffer(uint32_t)){0};
     scene->voxel_grid = (vx_buffer(uint8_t)){0};
 }
 
@@ -623,7 +634,7 @@ typedef struct vxray
     // GPU
     SDL_GPUGraphicsPipeline* pipeline;
     SDL_GPUTexture*          voxel_texture;
-    SDL_GPUTexture*          brick_texture;
+    SDL_GPUTexture*          voxel_mask_texture;
     SDL_GPUBuffer*           palette_buffer;
 } vxray;
 
@@ -798,6 +809,15 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 vx_scene_free(&scene);
                 return SDL_APP_FAILURE;
             }
+            if (!SDL_GPUTextureSupportsFormat(
+                    vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R32G32_UINT,
+                    SDL_GPU_TEXTURETYPE_3D, SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
+            {
+                SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                             "TEXTUREFORMAT_R32G32_UINT not supported on this device");
+                vx_scene_free(&scene);
+                return SDL_APP_FAILURE;
+            }
 
             {
                 uint32_t const        voxel_buffer_size = (uint32_t)scene.voxel_grid.count;
@@ -827,31 +847,32 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 vxray_instance.voxel_texture = voxel_texture;
             }
             {
-                uint32_t const        brick_grid_size = (uint32_t)scene.brick_grid.count;
-                SDL_GPUTexture* const brick_texture = SDL_CreateGPUTexture(
+                uint32_t const voxel_mask_size =
+                    (uint32_t)scene.voxel_masks.count * (uint32_t)sizeof(uint32_t);
+                SDL_GPUTexture* const voxel_mask_texture = SDL_CreateGPUTexture(
                     device,
                     &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
-                                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                                .format = SDL_GPU_TEXTUREFORMAT_R32G32_UINT,
                                                 .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
                                                 .width = scene.brick_grid_ext,
                                                 .height = scene.brick_grid_ext,
                                                 .layer_count_or_depth = scene.brick_grid_ext,
                                                 .num_levels = 1,
                                                 .sample_count = SDL_GPU_SAMPLECOUNT_1});
-                if (!brick_texture)
+                if (!voxel_mask_texture)
                 {
-                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create brick grid texture: %s",
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel mask texture: %s",
                                  SDL_GetError());
                     vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
-                if (!vx_gpu_texture_upload(device, brick_texture, scene.brick_grid.ptr,
-                                           brick_grid_size, (uint32_t)scene.brick_grid_ext))
+                if (!vx_gpu_texture_upload(device, voxel_mask_texture, scene.voxel_masks.ptr,
+                                           voxel_mask_size, (uint32_t)scene.brick_grid_ext))
                 {
                     vx_scene_free(&scene);
                     return SDL_APP_FAILURE;
                 }
-                vxray_instance.brick_texture = brick_texture;
+                vxray_instance.voxel_mask_texture = voxel_mask_texture;
             }
             {
                 uint32_t const palette_size = 4 * 256;
@@ -1054,7 +1075,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.pipeline);
     SDL_GPUTexture* textures[] = {
         vxray_instance.voxel_texture,
-        vxray_instance.brick_texture,
+        vxray_instance.voxel_mask_texture,
     };
     SDL_BindGPUFragmentStorageTextures(render_pass, 0, textures, SDL_arraysize(textures));
     SDL_GPUBuffer* buffers[] = {
@@ -1106,10 +1127,10 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.palette_buffer = 0;
     }
 
-    if (vxray_instance.brick_texture)
+    if (vxray_instance.voxel_mask_texture)
     {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.brick_texture);
-        vxray_instance.brick_texture = 0;
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.voxel_mask_texture);
+        vxray_instance.voxel_mask_texture = 0;
     }
 
     if (vxray_instance.voxel_texture)
