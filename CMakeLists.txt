@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 
+# Pin the architecture since sandboxed (Codex) CMake regeneration can't use sysctl to
+# infer it. This results in a different config and a full SDL_shadercross dependency rebuild.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING "macOS build architectures")
+endif()
+
 if(CMAKE_GENERATOR STREQUAL "Xcode" AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 12.0)
 endif()
