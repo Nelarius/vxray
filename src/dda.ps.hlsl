@@ -9,7 +9,7 @@ struct ps_input
 ConstantBuffer<dda_uniforms> uniforms : register(b0, space3);
 
 Texture3D<uint>        voxels : register(t0, space2);
-Texture3D<uint2>       voxel_masks : register(t1, space2);
+Texture3D<uint>        bricks : register(t1, space2);
 StructuredBuffer<uint> palette_rgba : register(t2, space2);
 
 float3 unpack_rgba(uint const rgba)
@@ -19,6 +19,10 @@ float3 unpack_rgba(uint const rgba)
     float const b = (float)((rgba >> 16u) & 255u) / 255.0;
     return pow(float3(r, g, b), 2.2);
 }
+
+uint voxel_at(int3 const p) { return voxels.Load(int4(p, 0)).r; }
+
+uint brick_at(int3 const p) { return bricks.Load(int4(p, 0)).r; }
 
 bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
                   float3 const p1, out float tmin, out float tmax)
@@ -44,7 +48,7 @@ float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, flo
 }
 
 uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
-                 int3 const brick_cell, uint2 const voxel_mask)
+                 int3 const brick_cell)
 {
     int3 const  brick_min = brick_cell * VX_BRICK_EXT;
     float const t =
@@ -67,13 +71,10 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
             return 0u;
         }
 
-        uint const voxel_idx = (uint)(local_cell.x + local_cell.y * VX_BRICK_EXT +
-                                      local_cell.z * VX_BRICK_EXT * VX_BRICK_EXT);
-        uint const word = voxel_mask[voxel_idx >> 5u];
-        uint const bit = 1u << (voxel_idx & 31u);
-        if ((word & bit) != 0u)
+        uint const v = voxel_at(brick_min + local_cell);
+        if (v > 0u)
         {
-            return voxels.Load(int4(brick_min + local_cell, 0)).r;
+            return v;
         }
 
         // Branchless trick: https://www.shadertoy.com/view/4dX3zl
@@ -122,10 +123,9 @@ uint dda(float3 const origin, float3 const dir)
             return 0u;
         }
 
-        uint2 const voxel_mask = voxel_masks.Load(int4(brick_cell, 0)).rg;
-        if (any(voxel_mask != uint2(0u, 0u)))
+        if (brick_at(brick_cell) > 0u)
         {
-            uint const voxel = trace_brick(origin, dir, inv_dir, tdelta, brick_cell, voxel_mask);
+            uint const voxel = trace_brick(origin, dir, inv_dir, tdelta, brick_cell);
             if (voxel > 0u)
             {
                 return voxel;
