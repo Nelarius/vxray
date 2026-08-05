@@ -4,6 +4,11 @@ include(FetchContent)
 
 find_package(Git REQUIRED)
 
+FetchContent_Declare(cglm
+                     GIT_REPOSITORY "https://github.com/recp/cglm"
+                     GIT_TAG 58d8c15a124c202188d0094705f778f6129a2612 # Jul 29, 2026
+                     GIT_SHALLOW ON)
+
 FetchContent_Declare(cimgui
                      GIT_REPOSITORY "https://github.com/cimgui/cimgui"
                      GIT_TAG d298666861ebf00dcfeb2407409931c04e47e33c # May 30, 2026
@@ -32,6 +37,11 @@ FetchContent_Declare(sdl-shadercross
                          "${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply-patch.cmake")
 
 # Fetch
+
+set(CGLM_STATIC ON CACHE BOOL "" FORCE)
+set(CGLM_USE_ANONYMOUS_STRUCT ON CACHE BOOL "" FORCE)
+message(STATUS "Fetching cglm...")
+FetchContent_MakeAvailable(cglm)
 
 set(IMGUI_STATIC ON CACHE STRING "" FORCE)
 message(STATUS "Fetching cimgui...")
