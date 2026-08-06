@@ -163,9 +163,29 @@ uint multilevel_dda(float3 const origin, float3 const dir)
             }
         }
 
-        float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
-        tnext += axis_mask * tdelta;
-        brick_cell += int3(axis_mask) * step_dir;
+        if (tnext.x < tnext.y)
+        {
+            if (tnext.x < tnext.z)
+            {
+                brick_cell.x += step_dir.x;
+                tnext.x += tdelta.x;
+            }
+            else
+            {
+                brick_cell.z += step_dir.z;
+                tnext.z += tdelta.z;
+            }
+        }
+        else if (tnext.y < tnext.z)
+        {
+            brick_cell.y += step_dir.y;
+            tnext.y += tdelta.y;
+        }
+        else
+        {
+            brick_cell.z += step_dir.z;
+            tnext.z += tdelta.z;
+        }
     }
 
     return 0u;
