@@ -100,11 +100,29 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
             return v;
         }
 
-        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        // step(a, x) like a < x.
-        float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
-        tnext += axis_mask * tdelta;
-        local_cell += int3(axis_mask) * step_dir;
+        if (tnext.x < tnext.y)
+        {
+            if (tnext.x < tnext.z)
+            {
+                local_cell.x += step_dir.x;
+                tnext.x += tdelta.x;
+            }
+            else
+            {
+                local_cell.z += step_dir.z;
+                tnext.z += tdelta.z;
+            }
+        }
+        else if (tnext.y < tnext.z)
+        {
+            local_cell.y += step_dir.y;
+            tnext.y += tdelta.y;
+        }
+        else
+        {
+            local_cell.z += step_dir.z;
+            tnext.z += tdelta.z;
+        }
     }
 
     return 0u;
@@ -145,8 +163,6 @@ uint multilevel_dda(float3 const origin, float3 const dir)
             }
         }
 
-        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        // step(a, x) like a < x.
         float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
         tnext += axis_mask * tdelta;
         brick_cell += int3(axis_mask) * step_dir;
