@@ -23,8 +23,12 @@ add_executable(shader-compiler ${CMAKE_CURRENT_SOURCE_DIR}/src/shader_compiler.c
 target_link_libraries(shader-compiler PRIVATE SDL3::SDL3-static SDL3_shadercross::SDL3_shadercross)
 
 set(VXRAY_SHADER_SOURCES
+        brick_quad.cs.hlsl
+        brick_quad.ps.hlsl
+        brick_quad.vs.hlsl
         dda.ps.hlsl
-        dda.vs.hlsl)
+        dda.vs.hlsl
+        depth_visualize.ps.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 set(VXRAY_COMPILED_METAL_SHADERS_H ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.h)
@@ -42,6 +46,7 @@ add_custom_command(
         COMMENT "Compiling HLSL shaders..."
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         DEPENDS ${VXRAY_SHADER_SOURCES}
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/brick_quad.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/constants.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/dda.h)
 add_custom_target(compile-vxray-shaders DEPENDS ${VXRAY_COMPILED_METAL_SHADERS_C} ${VXRAY_COMPILED_SPIRV_SHADERS_C})
@@ -68,19 +73,26 @@ set(VXRAY_SOURCES
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.h>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.c>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
+        brick_quad.cs.hlsl
+        brick_quad.h
+        brick_quad.ps.hlsl
+        brick_quad.vs.hlsl
         constants.h
         cvox.cc
         cvox.h
         dda.h
         dda.ps.hlsl
         dda.vs.hlsl
+        depth_visualize.ps.hlsl
         hlsl_shim.h
         vxray.c)
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 add_executable(vxray ${VXRAY_SOURCES})
-target_link_libraries(vxray PRIVATE ogt SDL3::SDL3-static vxray-imgui)
-target_compile_definitions(vxray PRIVATE CIMGUI_DEFINE_ENUMS_AND_STRUCTS=1)
+target_link_libraries(vxray PRIVATE cglm ogt SDL3::SDL3-static vxray-imgui)
+target_compile_definitions(
+        vxray
+        PRIVATE CIMGUI_DEFINE_ENUMS_AND_STRUCTS=1)
 target_compile_options(
         vxray
         PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-fno-exceptions>

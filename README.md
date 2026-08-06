@@ -60,4 +60,5 @@ pitch = 0
 ## References
 
 - _Ray Axis-Aligned Bounding Box Intersection_, [Ray Tracing Gems II](https://developer.nvidia.com/ray-tracing-gems-ii)
-- _Brancless Voxel Raycasting_, [Shadertoy](https://www.shadertoy.com/view/4dX3zl)
+- _A Fast and Robust Method for Avoiding Self-Intersection_, [Ray Tracing Gems](https://www.realtimerendering.com/raytracinggems/rtg/index.html)
+- _Branchless Voxel Raycasting_, [Shadertoy](https://www.shadertoy.com/view/4dX3zl)

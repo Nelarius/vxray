@@ -42,6 +42,7 @@ set(CGLM_STATIC ON CACHE BOOL "" FORCE)
 set(CGLM_USE_ANONYMOUS_STRUCT ON CACHE BOOL "" FORCE)
 message(STATUS "Fetching cglm...")
 FetchContent_MakeAvailable(cglm)
+target_compile_definitions(cglm PUBLIC CGLM_FORCE_DEPTH_ZERO_TO_ONE=1)
 
 set(IMGUI_STATIC ON CACHE STRING "" FORCE)
 message(STATUS "Fetching cimgui...")

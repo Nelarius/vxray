@@ -4,11 +4,10 @@
 
 typedef struct dda_uniforms
 {
-    float4 camera_pos;
-    float4 camera_right;
-    float4 camera_up;
-    float4 camera_forward;
-    float2 viewport;
-    int    grid_ext;
-    int    pad;
+    float4   camera_pos;
+    float4x4 inverse_view_projection;
+    int      grid_ext;
+    int      pad0;
+    int      pad1;
+    int      pad2;
 } dda_uniforms;

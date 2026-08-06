@@ -43,6 +43,11 @@ typedef struct float4
     };
 } float4;
 
+typedef struct float4x4
+{
+    alignas(16) float data[4][4];
+} float4x4;
+
 typedef struct int2
 {
     union
