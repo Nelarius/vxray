@@ -5,6 +5,8 @@
 #include "hlsl_shim.h"
 
 #include <cglm/struct.h>
+#include <cglm/struct/clipspace/persp_lh_zo.h>
+#include <cglm/struct/clipspace/view_lh_zo.h>
 #include <cglm/util.h>
 #include <cimgui.h>
 #include <imgui_sdl3.h>
@@ -532,8 +534,8 @@ static void vx_camera_basis(vx_camera const* const camera, vec3s* const right, v
     *forward = vx_camera_forward(camera);
 
     vec3s const world_up = {0.f, 1.f, 0.f};
-    *right = glms_vec3_crossn(*forward, world_up);
-    *up = glms_vec3_cross(*right, *forward);
+    *right = glms_vec3_crossn(world_up, *forward);
+    *up = glms_vec3_cross(*forward, *right);
 }
 
 static void vx_camera_look_at(vx_camera* const camera, vec3s const target)
@@ -1247,7 +1249,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     {
         float const mouse_sensitivity = 0.003f;
         float const pitch_limit = 1.55334306f;
-        camera->yaw -= input->pointer_delta[0] * mouse_sensitivity;
+        camera->yaw += input->pointer_delta[0] * mouse_sensitivity;
         camera->pitch = SDL_clamp(camera->pitch - input->pointer_delta[1] * mouse_sensitivity,
                                   -pitch_limit, pitch_limit);
     }
@@ -1329,8 +1331,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     float const near_plane = 1.f;
     float const far_plane =
         glms_vec3_norm(camera->position) + sqrtf(3.f) * (float)vxray_instance.grid_ext + 1.f;
-    mat4s const view = glms_look(camera->position, forward, world_up);
-    mat4s       projection = glms_perspective(fov, aspect, near_plane, far_plane);
+    mat4s const view = glms_look_lh_zo(camera->position, forward, world_up);
+    mat4s       projection = glms_perspective_lh_zo(fov, aspect, near_plane, far_plane);
     mat4s const               view_projection = glms_mat4_mul(projection, view);
     mat4s const               inverse_view_projection = glms_mat4_inv(view_projection);
     brick_quad_uniforms const brick_uniforms = {
