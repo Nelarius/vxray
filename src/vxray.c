@@ -1331,10 +1331,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         glms_vec3_norm(camera->position) + sqrtf(3.f) * (float)vxray_instance.grid_ext + 1.f;
     mat4s const view = glms_look(camera->position, forward, world_up);
     mat4s       projection = glms_perspective(fov, aspect, near_plane, far_plane);
-#if defined(SDL_PLATFORM_WINDOWS)
-    // Vulkan's NDC Y axis points down; cglm and Metal's NDC Y axes point up.
-    projection.m11 = -projection.m11;
-#endif
     mat4s const               view_projection = glms_mat4_mul(projection, view);
     mat4s const               inverse_view_projection = glms_mat4_inv(view_projection);
     brick_quad_uniforms const brick_uniforms = {
