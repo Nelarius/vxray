@@ -72,7 +72,7 @@ float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, flo
     return max(max(lo.x, lo.y), max(lo.z, 0.0));
 }
 
-uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
+uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
                  int16_t3 const brick_cell)
 {
     int16_t3 const brick_min = brick_cell * (int16_t)VX_BRICK_EXT;
@@ -87,7 +87,7 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
     tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
-    for (int i = 0; i < 3 * VX_BRICK_EXT; ++i)
+    for (;;)
     {
         if (any((uint16_t3)local_cell >= (uint16_t)VX_BRICK_EXT))
         {
@@ -105,27 +105,25 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
             if (tnext.x < tnext.z)
             {
                 local_cell.x += step_dir.x;
-                tnext.x += tdelta.x;
+                tnext.x += (float)step_dir.x * inv_dir.x;
             }
             else
             {
                 local_cell.z += step_dir.z;
-                tnext.z += tdelta.z;
+                tnext.z += (float)step_dir.z * inv_dir.z;
             }
         }
         else if (tnext.y < tnext.z)
         {
             local_cell.y += step_dir.y;
-            tnext.y += tdelta.y;
+            tnext.y += (float)step_dir.y * inv_dir.y;
         }
         else
         {
             local_cell.z += step_dir.z;
-            tnext.z += tdelta.z;
+            tnext.z += (float)step_dir.z * inv_dir.z;
         }
     }
-
-    return 0u;
 }
 
 // Good insight into DDA: https://news.ycombinator.com/item?id=43599990
@@ -133,8 +131,6 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
 uint multilevel_dda(float3 const origin, float3 const dir)
 {
     float3 const inv_dir = 1.0 / dir;
-    float3 const tdelta = abs(inv_dir);
-
     float3 const entry = origin;
     int16_t3     brick_cell = int16_t3(entry / (float)VX_BRICK_EXT);
 
@@ -147,7 +143,7 @@ uint multilevel_dda(float3 const origin, float3 const dir)
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
 
     int16_t const brick_grid_ext = (int16_t)uniforms.grid_ext / (int16_t)VX_BRICK_EXT;
-    for (int i = 0; i < 3 * brick_grid_ext; ++i)
+    for (;;)
     {
         if (any((uint16_t3)brick_cell >= (uint16_t)brick_grid_ext))
         {
@@ -156,7 +152,7 @@ uint multilevel_dda(float3 const origin, float3 const dir)
 
         if (brick_at(brick_cell) > 0u)
         {
-            uint const voxel = trace_brick(origin, dir, inv_dir, tdelta, brick_cell);
+            uint const voxel = trace_brick(origin, dir, inv_dir, brick_cell);
             if (voxel > 0u)
             {
                 return voxel;
@@ -168,27 +164,25 @@ uint multilevel_dda(float3 const origin, float3 const dir)
             if (tnext.x < tnext.z)
             {
                 brick_cell.x += step_dir.x;
-                tnext.x += tdelta.x;
+                tnext.x += (float)step_dir.x * inv_dir.x;
             }
             else
             {
                 brick_cell.z += step_dir.z;
-                tnext.z += tdelta.z;
+                tnext.z += (float)step_dir.z * inv_dir.z;
             }
         }
         else if (tnext.y < tnext.z)
         {
             brick_cell.y += step_dir.y;
-            tnext.y += tdelta.y;
+            tnext.y += (float)step_dir.y * inv_dir.y;
         }
         else
         {
             brick_cell.z += step_dir.z;
-            tnext.z += tdelta.z;
+            tnext.z += (float)step_dir.z * inv_dir.z;
         }
     }
-
-    return 0u;
 }
 
 float4 main(ps_input const input) : SV_Target0
