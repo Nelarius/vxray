@@ -1333,8 +1333,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         glms_vec3_norm(camera->position) + sqrtf(3.f) * (float)vxray_instance.grid_ext + 1.f;
     mat4s const view = glms_look_lh_zo(camera->position, forward, world_up);
     mat4s       projection = glms_perspective_lh_zo(fov, aspect, near_plane, far_plane);
-    mat4s const               view_projection = glms_mat4_mul(projection, view);
-    mat4s const               inverse_view_projection = glms_mat4_inv(view_projection);
+    mat4s const view_projection = glms_mat4_mul(projection, view);
+    mat4s const inverse_view_projection = glms_mat4_inv(view_projection);
     brick_quad_uniforms const brick_uniforms = {
         .camera_position = vx_float4_from_vec3(camera->position, 0.f),
         .view_projection = vx_float4x4_from_mat4(view_projection),
