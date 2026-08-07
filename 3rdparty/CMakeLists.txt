@@ -34,6 +34,13 @@ FetchContent_Declare(sdl-shadercross
                          "-DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/sdl-shadercross-preserve-deployment-target.patch"
                          "-DSOURCE_DIR=<SOURCE_DIR>"
                          -P
+                         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply-patch.cmake"
+                     COMMAND
+                         ${CMAKE_COMMAND}
+                         "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+                         "-DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/sdl-shadercross-enable-16bit-types.patch"
+                         "-DSOURCE_DIR=<SOURCE_DIR>"
+                         -P
                          "${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply-patch.cmake")
 
 # Fetch
