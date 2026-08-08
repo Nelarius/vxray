@@ -626,7 +626,6 @@ typedef struct vxray
     SDL_GPUTexture*          entry_depth_texture;
     uint32_t                 entry_depth_width;
     uint32_t                 entry_depth_height;
-    SDL_GPUTextureFormat     entry_depth_format;
     SDL_GPUSampler*          entry_depth_sampler;
     SDL_GPUBuffer*           visible_faces_buffer;
     SDL_GPUBuffer*           indirect_draw_buffer;
@@ -635,26 +634,6 @@ typedef struct vxray
 } vxray;
 
 static vxray vxray_instance = {0};
-
-static SDL_GPUTextureFormat vx_entry_depth_format(SDL_GPUDevice* const device)
-{
-    SDL_GPUTextureUsageFlags const usage =
-        SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    SDL_GPUTextureFormat const candidates[] = {
-        SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-        SDL_GPU_TEXTUREFORMAT_D24_UNORM,
-        SDL_GPU_TEXTUREFORMAT_D16_UNORM,
-    };
-    for (int i = 0; i < SDL_arraysize(candidates); ++i)
-    {
-        if (SDL_GPUTextureSupportsFormat(device, candidates[i], SDL_GPU_TEXTURETYPE_2D, usage))
-        {
-            return candidates[i];
-        }
-    }
-
-    return SDL_GPU_TEXTUREFORMAT_INVALID;
-}
 
 static bool vx_ensure_entry_depth_texture(uint32_t const width, uint32_t const height)
 {
@@ -670,7 +649,7 @@ static bool vx_ensure_entry_depth_texture(uint32_t const width, uint32_t const h
     SDL_GPUTexture* const texture = SDL_CreateGPUTexture(
         vxray_instance.gpu_device,
         &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = vxray_instance.entry_depth_format,
+                                    .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
                                     .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
                                              SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                     .width = width,
@@ -764,10 +743,11 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
-    vxray_instance.entry_depth_format = vx_entry_depth_format(vxray_instance.gpu_device);
-    if (vxray_instance.entry_depth_format == SDL_GPU_TEXTUREFORMAT_INVALID)
+    if (!SDL_GPUTextureSupportsFormat(
+            vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+            SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER))
     {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "No sampleable depth-target format is supported");
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_D32_FLOAT not supported on this device");
         return SDL_APP_FAILURE;
     }
 
@@ -840,7 +820,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                .enable_depth_test = true,
                                                .enable_depth_write = true},
                 .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .depth_stencil_format = vxray_instance.entry_depth_format,
+                    .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
                     .has_depth_stencil_target = true}});
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
