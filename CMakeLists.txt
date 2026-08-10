@@ -12,6 +12,8 @@ endif()
 
 project(vxray C CXX)
 
+option(ENABLE_SHADER_DEBUGGING "Record shader source in compiled shaders" OFF)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -42,6 +44,7 @@ add_custom_command(
         COMMAND $<TARGET_FILE:shader-compiler>
         ${VXRAY_COMPILED_METAL_SHADERS_H} ${VXRAY_COMPILED_METAL_SHADERS_C}
         ${VXRAY_COMPILED_SPIRV_SHADERS_H} ${VXRAY_COMPILED_SPIRV_SHADERS_C}
+        $<$<BOOL:${ENABLE_SHADER_DEBUGGING}>:--debug-shaders>
         ${VXRAY_SHADER_SOURCES}
         COMMENT "Compiling HLSL shaders..."
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

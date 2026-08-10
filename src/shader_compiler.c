@@ -15,7 +15,7 @@
 
 #define MAX_PATH_LENGTH 512
 #define MAX_SYMBOL_LENGTH 256
-#define MAX_SHADER_LENGTH (1 << 15) // 32 KiB
+#define MAX_SHADER_LENGTH (1 << 17) // 128 KiB
 #define MAX_COMMAND_LENGTH 1024
 
 typedef struct compiled_shader
@@ -82,7 +82,8 @@ static bool run_command(char const* const command)
     return result == 0;
 }
 
-static bool compile_shader(char const* const input_file, compiled_shader* const result)
+static bool compile_shader(char const* const input_file, compiled_shader* const result,
+                           bool const debug_shaders)
 {
     bool success = false;
 
@@ -138,7 +139,7 @@ static bool compile_shader(char const* const input_file, compiled_shader* const 
     }
     if (spirv_size >= MAX_SHADER_LENGTH)
     {
-        fprintf(stderr, "SPIRV is too large, increase MAX_SHADER_LENGTH\n");
+        fprintf(stderr, "SPIRV is too large (%zu bytes), increase MAX_SHADER_LENGTH\n", spirv_size);
         goto spirv_cleanup;
     }
 
@@ -186,8 +187,8 @@ static bool compile_shader(char const* const input_file, compiled_shader* const 
 
     char command[MAX_COMMAND_LENGTH];
 
-    snprintf(command, sizeof(command), "%s -std=metal3.1 -o \"%s\" -c \"%s\"", metal_command,
-             air_path, metal_path);
+    snprintf(command, sizeof(command), "%s -std=metal3.1%s -o \"%s\" -c \"%s\"", metal_command,
+             debug_shaders ? " -frecord-sources -gline-tables-only" : "", air_path, metal_path);
     if (!run_command(command))
     {
         fprintf(stderr, "Failed to compile generated MSL %s\n", metal_path);
@@ -211,7 +212,8 @@ static bool compile_shader(char const* const input_file, compiled_shader* const 
     }
     if (compiled_msl_size >= MAX_SHADER_LENGTH)
     {
-        fprintf(stderr, "Compiled metallib is too large, increase MAX_SHADER_LENGTH\n");
+        fprintf(stderr, "Compiled metallib is too large (%zu bytes), increase MAX_SHADER_LENGTH\n",
+                compiled_msl_size);
         goto compiled_msl_cleanup;
     }
 
@@ -344,7 +346,9 @@ int main(int const argc, char** argv)
 {
     if (argc < 6)
     {
-        fprintf(stderr, "Usage: %s <metal.h> <metal.c> <spirv.h> <spirv.c> <shader.hlsl>...\n",
+        fprintf(stderr,
+                "Usage: %s <metal.h> <metal.c> <spirv.h> <spirv.c> [--debug-shaders] "
+                "<shader.hlsl>...\n",
                 argv[0]);
         return EXIT_FAILURE;
     }
@@ -357,19 +361,42 @@ int main(int const argc, char** argv)
 
     int result = EXIT_FAILURE;
 
-    int const shader_count = argc - 5;
-    assert(shader_count > 0);
+    bool debug_shaders = false;
+    int  shader_count = 0;
+    for (int i = 5; i < argc; ++i)
+    {
+        if (strcmp(argv[i], "--debug-shaders") == 0)
+        {
+            debug_shaders = true;
+        }
+        else
+        {
+            ++shader_count;
+        }
+    }
+    if (shader_count == 0)
+    {
+        fprintf(stderr, "No input HLSL files specified\n");
+        return EXIT_FAILURE;
+    }
 
     compiled_shader* const compiled_shaders = calloc((size_t)shader_count, sizeof(compiled_shader));
     assert(compiled_shaders);
 
-    for (int i = 0; i < shader_count; ++i)
+    int shader_index = 0;
+    for (int i = 5; i < argc; ++i)
     {
-        char const* const input_file = argv[i + 5];
-        if (!compile_shader(input_file, &compiled_shaders[i]))
+        if (strcmp(argv[i], "--debug-shaders") == 0)
+        {
+            continue;
+        }
+
+        char const* const input_file = argv[i];
+        if (!compile_shader(input_file, &compiled_shaders[shader_index], debug_shaders))
         {
             goto cleanup_compiled_shaders;
         }
+        ++shader_index;
     }
 
     shader_output* const metal_outputs = calloc((size_t)shader_count, sizeof(shader_output));
