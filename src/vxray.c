@@ -40,6 +40,12 @@ static_assert(sizeof(brick_quad_uniforms) == 96, "brick-quad uniform layout must
 static_assert(sizeof(dda_uniforms) == 96, "DDA uniform layout must match HLSL");
 static_assert(1024 / VX_BRICK_EXT <= 256, "brick-grid coordinates must fit in packed face records");
 
+enum
+{
+    VX_DISPLAY_TEXTURE_DDA,
+    VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH,
+};
+
 #if defined(SDL_PLATFORM_APPLE)
 
 #include "compiled_metal_shaders.h"
@@ -609,7 +615,7 @@ typedef struct vxray
     // Camera
     vx_camera camera;
     vx_input  input;
-    bool      visualize_brick_quad_depth;
+    int       display_texture;
 
     // Voxel grid
     int      grid_ext;
@@ -618,15 +624,17 @@ typedef struct vxray
 
     // GPU
     SDL_GPUGraphicsPipeline* dda_pipeline;
+    SDL_GPUGraphicsPipeline* display_pipeline;
     SDL_GPUGraphicsPipeline* depth_visualize_pipeline;
     SDL_GPUGraphicsPipeline* brick_quad_pipeline;
     SDL_GPUComputePipeline*  brick_quad_compute_pipeline;
     SDL_GPUTexture*          voxel_texture;
     SDL_GPUTexture*          brick_texture;
     SDL_GPUTexture*          entry_depth_texture;
-    uint32_t                 entry_depth_width;
-    uint32_t                 entry_depth_height;
-    SDL_GPUSampler*          entry_depth_sampler;
+    SDL_GPUTexture*          dda_texture;
+    uint32_t                 render_width;
+    uint32_t                 render_height;
+    SDL_GPUSampler*          display_sampler;
     SDL_GPUBuffer*           visible_faces_buffer;
     SDL_GPUBuffer*           indirect_draw_buffer;
     SDL_GPUTransferBuffer*   indirect_reset_transfer_buffer;
@@ -635,18 +643,18 @@ typedef struct vxray
 
 static vxray vxray_instance = {0};
 
-static bool vx_ensure_entry_depth_texture(uint32_t const width, uint32_t const height)
+static bool vx_ensure_render_textures(uint32_t const width, uint32_t const height)
 {
     assert(width > 0);
     assert(height > 0);
 
-    if (vxray_instance.entry_depth_texture && vxray_instance.entry_depth_width == width &&
-        vxray_instance.entry_depth_height == height)
+    if (vxray_instance.entry_depth_texture && vxray_instance.dda_texture &&
+        vxray_instance.render_width == width && vxray_instance.render_height == height)
     {
         return true;
     }
 
-    SDL_GPUTexture* const texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const entry_depth_texture = SDL_CreateGPUTexture(
         vxray_instance.gpu_device,
         &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
                                     .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
@@ -657,10 +665,29 @@ static bool vx_ensure_entry_depth_texture(uint32_t const width, uint32_t const h
                                     .layer_count_or_depth = 1,
                                     .num_levels = 1,
                                     .sample_count = SDL_GPU_SAMPLECOUNT_1});
-    if (!texture)
+    if (!entry_depth_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create entry depth texture: %s",
                      SDL_GetError());
+        return false;
+    }
+
+    SDL_GPUTexture* const dda_texture = SDL_CreateGPUTexture(
+        vxray_instance.gpu_device,
+        &(SDL_GPUTextureCreateInfo){
+            .type = SDL_GPU_TEXTURETYPE_2D,
+            .format =
+                SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device, vxray_instance.window),
+            .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
+            .width = width,
+            .height = height,
+            .layer_count_or_depth = 1,
+            .num_levels = 1,
+            .sample_count = SDL_GPU_SAMPLECOUNT_1});
+    if (!dda_texture)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create DDA texture: %s", SDL_GetError());
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_depth_texture);
         return false;
     }
 
@@ -668,9 +695,14 @@ static bool vx_ensure_entry_depth_texture(uint32_t const width, uint32_t const h
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.entry_depth_texture);
     }
-    vxray_instance.entry_depth_texture = texture;
-    vxray_instance.entry_depth_width = width;
-    vxray_instance.entry_depth_height = height;
+    if (vxray_instance.dda_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.dda_texture);
+    }
+    vxray_instance.entry_depth_texture = entry_depth_texture;
+    vxray_instance.dda_texture = dda_texture;
+    vxray_instance.render_width = width;
+    vxray_instance.render_height = height;
     return true;
 }
 
@@ -835,8 +867,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     // DDA fullscreen pipeline
 
     {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = DDA_VS_SIZE,
-                                                 .code = DDA_VS_BYTES,
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
+                                                 .code = FULLSCREEN_VS_BYTES,
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX};
@@ -891,11 +923,67 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
     }
 
-    // Fullscreen depth visualization pipeline
+    // Fullscreen display pipelines
 
     {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = DDA_VS_SIZE,
-                                                 .code = DDA_VS_BYTES,
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
+                                                 .code = FULLSCREEN_VS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX};
+        SDL_GPUShaderCreateInfo const ps_info = {.code_size = DISPLAY_PS_SIZE,
+                                                 .code = DISPLAY_PS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                 .num_samplers = 1};
+        SDL_GPUShader* const          vertex_shader =
+            SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
+        SDL_GPUShader* const fragment_shader =
+            SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
+        if (!vertex_shader || !fragment_shader)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display shaders: %s",
+                         SDL_GetError());
+            if (fragment_shader)
+            {
+                SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
+            }
+            if (vertex_shader)
+            {
+                SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
+            }
+            return SDL_APP_FAILURE;
+        }
+
+        vxray_instance.display_pipeline = SDL_CreateGPUGraphicsPipeline(
+            vxray_instance.gpu_device,
+            &(SDL_GPUGraphicsPipelineCreateInfo){
+                .vertex_shader = vertex_shader,
+                .fragment_shader = fragment_shader,
+                .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+                .rasterizer_state =
+                    (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
+                                             .cull_mode = SDL_GPU_CULLMODE_BACK,
+                                             .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
+                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
+                    .num_color_targets = 1,
+                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
+                        {.format = SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device,
+                                                                    vxray_instance.window)}}}});
+        SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
+        SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
+        if (!vxray_instance.display_pipeline)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display pipeline: %s",
+                         SDL_GetError());
+            return SDL_APP_FAILURE;
+        }
+    }
+
+    {
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
+                                                 .code = FULLSCREEN_VS_BYTES,
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX};
@@ -951,7 +1039,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
     }
 
-    vxray_instance.entry_depth_sampler = SDL_CreateGPUSampler(
+    vxray_instance.display_sampler = SDL_CreateGPUSampler(
         vxray_instance.gpu_device,
         &(SDL_GPUSamplerCreateInfo){.min_filter = SDL_GPU_FILTER_NEAREST,
                                     .mag_filter = SDL_GPU_FILTER_NEAREST,
@@ -959,10 +1047,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                     .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
                                     .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
                                     .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE});
-    if (!vxray_instance.entry_depth_sampler)
+    if (!vxray_instance.display_sampler)
     {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create entry depth sampler: %s",
-                     SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display sampler: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
@@ -1256,8 +1343,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     //
 
     imgui_sdl3_new_frame();
-    igBegin("Brick quad pre-pass", 0, 0);
-    igCheckbox("Visualize brick quad depth", &vxray_instance.visualize_brick_quad_depth);
+    igBegin("Display", 0, 0);
+    igRadioButton_IntPtr("Brick AABB depth", &vxray_instance.display_texture,
+                         VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH);
+    igRadioButton_IntPtr("DDA", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_DDA);
     igText("Face capacity: %u", vxray_instance.face_capacity);
     igEnd();
     igRender();
@@ -1296,7 +1385,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         return SDL_APP_CONTINUE;
     }
 
-    if (!vx_ensure_entry_depth_texture(width, height))
+    if (!vx_ensure_render_textures(width, height))
     {
         SDL_CancelGPUCommandBuffer(cmd_buffer);
         return SDL_APP_FAILURE;
@@ -1397,7 +1486,32 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_DrawGPUPrimitivesIndirect(depth_pass, vxray_instance.indirect_draw_buffer, 0, 1);
     SDL_EndGPURenderPass(depth_pass);
 
-    // Visualize the entry depth or render the voxel DDA.
+    // Render the voxel DDA to an intermediate texture.
+
+    SDL_GPUColorTargetInfo const dda_target_info = {.texture = vxray_instance.dda_texture,
+                                                    .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
+                                                    .load_op = SDL_GPU_LOADOP_CLEAR,
+                                                    .store_op = SDL_GPU_STOREOP_STORE,
+                                                    .cycle = true};
+    SDL_GPURenderPass* const dda_pass = SDL_BeginGPURenderPass(cmd_buffer, &dda_target_info, 1, 0);
+    assert(dda_pass);
+    SDL_BindGPUGraphicsPipeline(dda_pass, vxray_instance.dda_pipeline);
+    SDL_GPUTextureSamplerBinding const entry_depth_binding = {
+        .texture = vxray_instance.entry_depth_texture, .sampler = vxray_instance.display_sampler};
+    SDL_BindGPUFragmentSamplers(dda_pass, 0, &entry_depth_binding, 1);
+    SDL_GPUTexture* const storage_textures[] = {
+        vxray_instance.voxel_texture,
+        vxray_instance.brick_texture,
+    };
+    SDL_BindGPUFragmentStorageTextures(dda_pass, 0, storage_textures,
+                                       SDL_arraysize(storage_textures));
+    SDL_GPUBuffer* const storage_buffers[] = {vxray_instance.palette_buffer};
+    SDL_BindGPUFragmentStorageBuffers(dda_pass, 0, storage_buffers, SDL_arraysize(storage_buffers));
+    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &dda_uniform_data, sizeof(dda_uniform_data));
+    SDL_DrawGPUPrimitives(dda_pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(dda_pass);
+
+    // Display the selected intermediate texture on the swapchain.
 
     SDL_GPUColorTargetInfo const color_target_info = {.texture = swapchain_texture,
                                                       .clear_color =
@@ -1407,13 +1521,13 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target_info, 1, 0);
     assert(render_pass);
 
-    if (vxray_instance.visualize_brick_quad_depth)
+    if (vxray_instance.display_texture == VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH)
     {
         SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.depth_visualize_pipeline);
-        SDL_GPUTextureSamplerBinding const entry_depth_binding = {
+        SDL_GPUTextureSamplerBinding const depth_display_binding = {
             .texture = vxray_instance.entry_depth_texture,
-            .sampler = vxray_instance.entry_depth_sampler};
-        SDL_BindGPUFragmentSamplers(render_pass, 0, &entry_depth_binding, 1);
+            .sampler = vxray_instance.display_sampler};
+        SDL_BindGPUFragmentSamplers(render_pass, 0, &depth_display_binding, 1);
         depth_visualize_uniforms const visualize_uniforms = {
             .near_plane = near_plane,
             .far_plane = far_plane,
@@ -1423,21 +1537,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     }
     else
     {
-        SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.dda_pipeline);
-        SDL_GPUTextureSamplerBinding const entry_depth_binding = {
-            .texture = vxray_instance.entry_depth_texture,
-            .sampler = vxray_instance.entry_depth_sampler};
-        SDL_BindGPUFragmentSamplers(render_pass, 0, &entry_depth_binding, 1);
-        SDL_GPUTexture* const storage_textures[] = {
-            vxray_instance.voxel_texture,
-            vxray_instance.brick_texture,
-        };
-        SDL_BindGPUFragmentStorageTextures(render_pass, 0, storage_textures,
-                                           SDL_arraysize(storage_textures));
-        SDL_GPUBuffer* const storage_buffers[] = {vxray_instance.palette_buffer};
-        SDL_BindGPUFragmentStorageBuffers(render_pass, 0, storage_buffers,
-                                          SDL_arraysize(storage_buffers));
-        SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &dda_uniform_data, sizeof(dda_uniform_data));
+        SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.display_pipeline);
+        SDL_GPUTextureSamplerBinding const display_binding = {
+            .texture = vxray_instance.dda_texture, .sampler = vxray_instance.display_sampler};
+        SDL_BindGPUFragmentSamplers(render_pass, 0, &display_binding, 1);
     }
     SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
     imgui_sdl3_render_draw_data(cmd_buffer, render_pass);
@@ -1502,10 +1605,16 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.entry_depth_texture = 0;
     }
 
-    if (vxray_instance.entry_depth_sampler)
+    if (vxray_instance.dda_texture)
     {
-        SDL_ReleaseGPUSampler(vxray_instance.gpu_device, vxray_instance.entry_depth_sampler);
-        vxray_instance.entry_depth_sampler = 0;
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.dda_texture);
+        vxray_instance.dda_texture = 0;
+    }
+
+    if (vxray_instance.display_sampler)
+    {
+        SDL_ReleaseGPUSampler(vxray_instance.gpu_device, vxray_instance.display_sampler);
+        vxray_instance.display_sampler = 0;
     }
 
     if (vxray_instance.depth_visualize_pipeline)
@@ -1519,6 +1628,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.dda_pipeline);
         vxray_instance.dda_pipeline = 0;
+    }
+
+    if (vxray_instance.display_pipeline)
+    {
+        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.display_pipeline);
+        vxray_instance.display_pipeline = 0;
     }
 
     if (vxray_instance.brick_quad_pipeline)

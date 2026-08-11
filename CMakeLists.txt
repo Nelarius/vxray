@@ -29,8 +29,9 @@ set(VXRAY_SHADER_SOURCES
         brick_quad.ps.hlsl
         brick_quad.vs.hlsl
         dda.ps.hlsl
-        dda.vs.hlsl
-        depth_visualize.ps.hlsl)
+        display.ps.hlsl
+        depth_visualize.ps.hlsl
+        fullscreen.vs.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 set(VXRAY_COMPILED_METAL_SHADERS_H ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.h)
@@ -85,8 +86,9 @@ set(VXRAY_SOURCES
         cvox.h
         dda.h
         dda.ps.hlsl
-        dda.vs.hlsl
+        display.ps.hlsl
         depth_visualize.ps.hlsl
+        fullscreen.vs.hlsl
         hlsl_shim.h
         vxray.c)
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
