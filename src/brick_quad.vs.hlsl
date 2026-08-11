@@ -41,10 +41,10 @@ float4 main(uint const vertex_id : SV_VertexID, uint const instance_id : SV_Inst
         float2(0.0, 1.0),
     };
 
-    uint const  face_record = visible_faces[instance_id];
+    uint const  face_data = visible_faces[instance_id];
     uint3 const brick =
-        uint3(face_record & 0xffu, (face_record >> 8u) & 0xffu, (face_record >> 16u) & 0xffu);
-    uint const   face = (face_record >> 24u) & 0x7u;
+        uint3(face_data & 0xffu, (face_data >> 8u) & 0xffu, (face_data >> 16u) & 0xffu);
+    uint const   face = (face_data >> 24u) & 0x7u;
     float3 const world_position =
         float3(brick * VX_BRICK_EXT) + face_corner(face, corners[corner_indices[vertex_id]]);
     return mul(uniforms.view_projection, float4(world_position, 1.0));

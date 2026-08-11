@@ -28,10 +28,9 @@ set(VXRAY_SHADER_SOURCES
         brick_quad.cs.hlsl
         brick_quad.ps.hlsl
         brick_quad.vs.hlsl
-        dda.ps.hlsl
         display.ps.hlsl
-        depth_visualize.ps.hlsl
-        fullscreen.vs.hlsl)
+        fullscreen.vs.hlsl
+        gbuffer.ps.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 set(VXRAY_COMPILED_METAL_SHADERS_H ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.h)
@@ -52,7 +51,8 @@ add_custom_command(
         DEPENDS ${VXRAY_SHADER_SOURCES}
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/brick_quad.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/constants.h
-                ${CMAKE_CURRENT_SOURCE_DIR}/src/dda.h)
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/display.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/gbuffer.h)
 add_custom_target(compile-vxray-shaders DEPENDS ${VXRAY_COMPILED_METAL_SHADERS_C} ${VXRAY_COMPILED_SPIRV_SHADERS_C})
 add_dependencies(compile-vxray-shaders shader-compiler)
 
@@ -84,11 +84,11 @@ set(VXRAY_SOURCES
         constants.h
         cvox.cc
         cvox.h
-        dda.h
-        dda.ps.hlsl
+        display.h
         display.ps.hlsl
-        depth_visualize.ps.hlsl
         fullscreen.vs.hlsl
+        gbuffer.h
+        gbuffer.ps.hlsl
         hlsl_shim.h
         vxray.c)
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)

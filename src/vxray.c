@@ -1,7 +1,8 @@
 #include "brick_quad.h"
 #include "constants.h"
 #include "cvox.h"
-#include "dda.h"
+#include "display.h"
+#include "gbuffer.h"
 #include "hlsl_shim.h"
 
 #include <cglm/struct.h>
@@ -37,14 +38,9 @@
 
 static_assert(sizeof(float4x4) == 64, "float4x4 must match an HLSL column-major matrix");
 static_assert(sizeof(brick_quad_uniforms) == 96, "brick-quad uniform layout must match HLSL");
-static_assert(sizeof(dda_uniforms) == 96, "DDA uniform layout must match HLSL");
+static_assert(sizeof(display_uniforms) == 16, "display uniform layout must match HLSL");
+static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
 static_assert(1024 / VX_BRICK_EXT <= 256, "brick-grid coordinates must fit in packed face records");
-
-enum
-{
-    VX_DISPLAY_TEXTURE_DDA,
-    VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH,
-};
 
 #if defined(SDL_PLATFORM_APPLE)
 
@@ -623,15 +619,16 @@ typedef struct vxray
     uint32_t face_capacity;
 
     // GPU
-    SDL_GPUGraphicsPipeline* dda_pipeline;
+    SDL_GPUGraphicsPipeline* gbuffer_pipeline;
     SDL_GPUGraphicsPipeline* display_pipeline;
-    SDL_GPUGraphicsPipeline* depth_visualize_pipeline;
     SDL_GPUGraphicsPipeline* brick_quad_pipeline;
     SDL_GPUComputePipeline*  brick_quad_compute_pipeline;
     SDL_GPUTexture*          voxel_texture;
     SDL_GPUTexture*          brick_texture;
     SDL_GPUTexture*          entry_depth_texture;
-    SDL_GPUTexture*          dda_texture;
+    SDL_GPUTexture*          gbuffer_albedo_texture;
+    SDL_GPUTexture*          gbuffer_normal_texture;
+    SDL_GPUTexture*          gbuffer_depth_texture;
     uint32_t                 render_width;
     uint32_t                 render_height;
     SDL_GPUSampler*          display_sampler;
@@ -648,7 +645,8 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     assert(width > 0);
     assert(height > 0);
 
-    if (vxray_instance.entry_depth_texture && vxray_instance.dda_texture &&
+    if (vxray_instance.entry_depth_texture && vxray_instance.gbuffer_albedo_texture &&
+        vxray_instance.gbuffer_normal_texture && vxray_instance.gbuffer_depth_texture &&
         vxray_instance.render_width == width && vxray_instance.render_height == height)
     {
         return true;
@@ -672,21 +670,62 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const dda_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const gbuffer_albedo_texture = SDL_CreateGPUTexture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){
-            .type = SDL_GPU_TEXTURETYPE_2D,
-            .format =
-                SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device, vxray_instance.window),
-            .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER,
-            .width = width,
-            .height = height,
-            .layer_count_or_depth = 1,
-            .num_levels = 1,
-            .sample_count = SDL_GPU_SAMPLECOUNT_1});
-    if (!dda_texture)
+        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                    .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
+                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                    .width = width,
+                                    .height = height,
+                                    .layer_count_or_depth = 1,
+                                    .num_levels = 1,
+                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+    if (!gbuffer_albedo_texture)
     {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create DDA texture: %s", SDL_GetError());
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create G-buffer albedo texture: %s",
+                     SDL_GetError());
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_depth_texture);
+        return false;
+    }
+
+    SDL_GPUTexture* const gbuffer_normal_texture = SDL_CreateGPUTexture(
+        vxray_instance.gpu_device,
+        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                    .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                    .width = width,
+                                    .height = height,
+                                    .layer_count_or_depth = 1,
+                                    .num_levels = 1,
+                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+    if (!gbuffer_normal_texture)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create G-buffer normal texture: %s",
+                     SDL_GetError());
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_albedo_texture);
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_depth_texture);
+        return false;
+    }
+
+    SDL_GPUTexture* const gbuffer_depth_texture = SDL_CreateGPUTexture(
+        vxray_instance.gpu_device,
+        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                    .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                                    .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                    .width = width,
+                                    .height = height,
+                                    .layer_count_or_depth = 1,
+                                    .num_levels = 1,
+                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+    if (!gbuffer_depth_texture)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create G-buffer depth texture: %s",
+                     SDL_GetError());
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_normal_texture);
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_albedo_texture);
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_depth_texture);
         return false;
     }
@@ -695,12 +734,22 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.entry_depth_texture);
     }
-    if (vxray_instance.dda_texture)
+    if (vxray_instance.gbuffer_albedo_texture)
     {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.dda_texture);
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_albedo_texture);
+    }
+    if (vxray_instance.gbuffer_normal_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_normal_texture);
+    }
+    if (vxray_instance.gbuffer_depth_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_depth_texture);
     }
     vxray_instance.entry_depth_texture = entry_depth_texture;
-    vxray_instance.dda_texture = dda_texture;
+    vxray_instance.gbuffer_albedo_texture = gbuffer_albedo_texture;
+    vxray_instance.gbuffer_normal_texture = gbuffer_normal_texture;
+    vxray_instance.gbuffer_depth_texture = gbuffer_depth_texture;
     vxray_instance.render_width = width;
     vxray_instance.render_height = height;
     return true;
@@ -780,6 +829,20 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER))
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_D32_FLOAT not supported on this device");
+        return SDL_APP_FAILURE;
+    }
+    if (!SDL_GPUTextureSupportsFormat(
+            vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R32_UINT, SDL_GPU_TEXTURETYPE_2D,
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_R32_UINT not supported on this device");
+        return SDL_APP_FAILURE;
+    }
+    if (!SDL_GPUTextureSupportsFormat(
+            vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R8_UINT, SDL_GPU_TEXTURETYPE_2D,
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_R8_UINT not supported on this device");
         return SDL_APP_FAILURE;
     }
 
@@ -864,7 +927,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
     }
 
-    // DDA fullscreen pipeline
+    // G-buffer fullscreen pipeline
 
     {
         SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
@@ -872,8 +935,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_VERTEX};
-        SDL_GPUShaderCreateInfo const ps_info = {.code_size = DDA_PS_SIZE,
-                                                 .code = DDA_PS_BYTES,
+        SDL_GPUShaderCreateInfo const ps_info = {.code_size = GBUFFER_PS_SIZE,
+                                                 .code = GBUFFER_PS_BYTES,
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
@@ -887,7 +950,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
         if (!vertex_shader || !fragment_shader)
         {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create DDA shaders: %s", SDL_GetError());
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create G-buffer shaders: %s",
+                         SDL_GetError());
             if (fragment_shader)
             {
                 SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
@@ -899,7 +963,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
-        vxray_instance.dda_pipeline = SDL_CreateGPUGraphicsPipeline(
+        vxray_instance.gbuffer_pipeline = SDL_CreateGPUGraphicsPipeline(
             vxray_instance.gpu_device,
             &(SDL_GPUGraphicsPipelineCreateInfo){
                 .vertex_shader = vertex_shader,
@@ -909,21 +973,29 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
                                              .cull_mode = SDL_GPU_CULLMODE_BACK,
                                              .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
+                .depth_stencil_state =
+                    (SDL_GPUDepthStencilState){.compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+                                               .enable_depth_test = true,
+                                               .enable_depth_write = true},
                 .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 1,
-                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device,
-                                                                    vxray_instance.window)}}}});
+                    .num_color_targets = 2,
+                    .color_target_descriptions =
+                        (SDL_GPUColorTargetDescription[]){
+                            {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT},
+                            {.format = SDL_GPU_TEXTUREFORMAT_R8_UINT}},
+                    .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                    .has_depth_stencil_target = true}});
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-        if (!vxray_instance.dda_pipeline)
+        if (!vxray_instance.gbuffer_pipeline)
         {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create DDA pipeline: %s", SDL_GetError());
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create G-buffer pipeline: %s",
+                         SDL_GetError());
             return SDL_APP_FAILURE;
         }
     }
 
-    // Fullscreen display pipelines
+    // Fullscreen display pipeline
 
     {
         SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
@@ -936,7 +1008,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_samplers = 1};
+                                                 .num_samplers = 2,
+                                                 .num_storage_textures = 2,
+                                                 .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
         SDL_GPUShader* const fragment_shader =
@@ -976,64 +1050,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         if (!vxray_instance.display_pipeline)
         {
             SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display pipeline: %s",
-                         SDL_GetError());
-            return SDL_APP_FAILURE;
-        }
-    }
-
-    {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
-                                                 .code = FULLSCREEN_VS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX};
-        SDL_GPUShaderCreateInfo const ps_info = {.code_size = DEPTH_VISUALIZE_PS_SIZE,
-                                                 .code = DEPTH_VISUALIZE_PS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_samplers = 1,
-                                                 .num_uniform_buffers = 1};
-        SDL_GPUShader* const          vertex_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
-        SDL_GPUShader* const fragment_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
-        if (!vertex_shader || !fragment_shader)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create depth visualization shaders: %s",
-                         SDL_GetError());
-            if (fragment_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-            }
-            if (vertex_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-            }
-            return SDL_APP_FAILURE;
-        }
-
-        vxray_instance.depth_visualize_pipeline = SDL_CreateGPUGraphicsPipeline(
-            vxray_instance.gpu_device,
-            &(SDL_GPUGraphicsPipelineCreateInfo){
-                .vertex_shader = vertex_shader,
-                .fragment_shader = fragment_shader,
-                .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-                .rasterizer_state =
-                    (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
-                                             .cull_mode = SDL_GPU_CULLMODE_BACK,
-                                             .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
-                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 1,
-                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device,
-                                                                    vxray_instance.window)}}}});
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-        if (!vxray_instance.depth_visualize_pipeline)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU,
-                         "Couldn't create depth visualization graphics pipeline: %s",
                          SDL_GetError());
             return SDL_APP_FAILURE;
         }
@@ -1344,9 +1360,12 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
 
     imgui_sdl3_new_frame();
     igBegin("Display", 0, 0);
+    igRadioButton_IntPtr("Albedo", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_ALBEDO);
+    igRadioButton_IntPtr("Normal", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_NORMAL);
+    igRadioButton_IntPtr("Surface depth", &vxray_instance.display_texture,
+                         VX_DISPLAY_TEXTURE_SURFACE_DEPTH);
     igRadioButton_IntPtr("Brick AABB depth", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH);
-    igRadioButton_IntPtr("DDA", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_DDA);
     igText("Face capacity: %u", vxray_instance.face_capacity);
     igEnd();
     igRender();
@@ -1408,10 +1427,11 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         .camera_position = vx_float4_from_vec3(camera->position, 0.f),
         .view_projection = vx_float4x4_from_mat4(view_projection),
         .brick_grid_ext = (uint)vxray_instance.brick_grid_ext};
-    dda_uniforms const dda_uniform_data = {.camera_pos = vx_float4_from_vec3(camera->position, 0.f),
-                                           .inverse_view_projection =
-                                               vx_float4x4_from_mat4(inverse_view_projection),
-                                           .grid_ext = vxray_instance.grid_ext};
+    gbuffer_uniforms const gbuffer_uniform_data = {
+        .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
+        .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
+        .view_projection = vx_float4x4_from_mat4(view_projection),
+        .grid_ext = vxray_instance.grid_ext};
 
     // Reset the complete indirect draw command on the GPU timeline.
 
@@ -1486,30 +1506,48 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_DrawGPUPrimitivesIndirect(depth_pass, vxray_instance.indirect_draw_buffer, 0, 1);
     SDL_EndGPURenderPass(depth_pass);
 
-    // Render the voxel DDA to an intermediate texture.
+    // Trace the primary voxel rays into the G-buffer.
 
-    SDL_GPUColorTargetInfo const dda_target_info = {.texture = vxray_instance.dda_texture,
-                                                    .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
-                                                    .load_op = SDL_GPU_LOADOP_CLEAR,
-                                                    .store_op = SDL_GPU_STOREOP_STORE,
-                                                    .cycle = true};
-    SDL_GPURenderPass* const dda_pass = SDL_BeginGPURenderPass(cmd_buffer, &dda_target_info, 1, 0);
-    assert(dda_pass);
-    SDL_BindGPUGraphicsPipeline(dda_pass, vxray_instance.dda_pipeline);
+    SDL_GPUColorTargetInfo const gbuffer_target_info[] = {
+        {.texture = vxray_instance.gbuffer_albedo_texture,
+         .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
+         .load_op = SDL_GPU_LOADOP_CLEAR,
+         .store_op = SDL_GPU_STOREOP_STORE,
+         .cycle = true},
+        {.texture = vxray_instance.gbuffer_normal_texture,
+         .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
+         .load_op = SDL_GPU_LOADOP_CLEAR,
+         .store_op = SDL_GPU_STOREOP_STORE,
+         .cycle = true}};
+    SDL_GPUDepthStencilTargetInfo const gbuffer_depth_target_info = {
+        .texture = vxray_instance.gbuffer_depth_texture,
+        .clear_depth = 1.f,
+        .load_op = SDL_GPU_LOADOP_CLEAR,
+        .store_op = SDL_GPU_STOREOP_STORE,
+        .stencil_load_op = SDL_GPU_LOADOP_DONT_CARE,
+        .stencil_store_op = SDL_GPU_STOREOP_DONT_CARE,
+        .cycle = true};
+    SDL_GPURenderPass* const gbuffer_pass =
+        SDL_BeginGPURenderPass(cmd_buffer, gbuffer_target_info, SDL_arraysize(gbuffer_target_info),
+                               &gbuffer_depth_target_info);
+    assert(gbuffer_pass);
+    SDL_BindGPUGraphicsPipeline(gbuffer_pass, vxray_instance.gbuffer_pipeline);
     SDL_GPUTextureSamplerBinding const entry_depth_binding = {
         .texture = vxray_instance.entry_depth_texture, .sampler = vxray_instance.display_sampler};
-    SDL_BindGPUFragmentSamplers(dda_pass, 0, &entry_depth_binding, 1);
+    SDL_BindGPUFragmentSamplers(gbuffer_pass, 0, &entry_depth_binding, 1);
     SDL_GPUTexture* const storage_textures[] = {
         vxray_instance.voxel_texture,
         vxray_instance.brick_texture,
     };
-    SDL_BindGPUFragmentStorageTextures(dda_pass, 0, storage_textures,
+    SDL_BindGPUFragmentStorageTextures(gbuffer_pass, 0, storage_textures,
                                        SDL_arraysize(storage_textures));
     SDL_GPUBuffer* const storage_buffers[] = {vxray_instance.palette_buffer};
-    SDL_BindGPUFragmentStorageBuffers(dda_pass, 0, storage_buffers, SDL_arraysize(storage_buffers));
-    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &dda_uniform_data, sizeof(dda_uniform_data));
-    SDL_DrawGPUPrimitives(dda_pass, 3, 1, 0, 0);
-    SDL_EndGPURenderPass(dda_pass);
+    SDL_BindGPUFragmentStorageBuffers(gbuffer_pass, 0, storage_buffers,
+                                      SDL_arraysize(storage_buffers));
+    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &gbuffer_uniform_data,
+                                   sizeof(gbuffer_uniform_data));
+    SDL_DrawGPUPrimitives(gbuffer_pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(gbuffer_pass);
 
     // Display the selected intermediate texture on the swapchain.
 
@@ -1521,27 +1559,25 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target_info, 1, 0);
     assert(render_pass);
 
-    if (vxray_instance.display_texture == VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH)
-    {
-        SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.depth_visualize_pipeline);
-        SDL_GPUTextureSamplerBinding const depth_display_binding = {
-            .texture = vxray_instance.entry_depth_texture,
-            .sampler = vxray_instance.display_sampler};
-        SDL_BindGPUFragmentSamplers(render_pass, 0, &depth_display_binding, 1);
-        depth_visualize_uniforms const visualize_uniforms = {
-            .near_plane = near_plane,
-            .far_plane = far_plane,
-            .visualization_range = 2.f * (float)vxray_instance.grid_ext};
-        SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &visualize_uniforms,
-                                       sizeof(visualize_uniforms));
-    }
-    else
-    {
-        SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.display_pipeline);
-        SDL_GPUTextureSamplerBinding const display_binding = {
-            .texture = vxray_instance.dda_texture, .sampler = vxray_instance.display_sampler};
-        SDL_BindGPUFragmentSamplers(render_pass, 0, &display_binding, 1);
-    }
+    SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.display_pipeline);
+    SDL_GPUTextureSamplerBinding const display_bindings[] = {
+        {.texture = vxray_instance.gbuffer_depth_texture,
+         .sampler = vxray_instance.display_sampler},
+        {.texture = vxray_instance.entry_depth_texture, .sampler = vxray_instance.display_sampler}};
+    SDL_BindGPUFragmentSamplers(render_pass, 0, display_bindings, SDL_arraysize(display_bindings));
+    SDL_GPUTexture* const display_storage_textures[] = {
+        vxray_instance.gbuffer_albedo_texture,
+        vxray_instance.gbuffer_normal_texture,
+    };
+    SDL_BindGPUFragmentStorageTextures(render_pass, 0, display_storage_textures,
+                                       SDL_arraysize(display_storage_textures));
+    display_uniforms const display_uniform_data = {
+        .texture_type = (uint)vxray_instance.display_texture,
+        .near_plane = near_plane,
+        .far_plane = far_plane,
+        .visualization_range = 2.f * (float)vxray_instance.grid_ext};
+    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &display_uniform_data,
+                                   sizeof(display_uniform_data));
     SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
     imgui_sdl3_render_draw_data(cmd_buffer, render_pass);
     SDL_EndGPURenderPass(render_pass);
@@ -1605,10 +1641,22 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.entry_depth_texture = 0;
     }
 
-    if (vxray_instance.dda_texture)
+    if (vxray_instance.gbuffer_depth_texture)
     {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.dda_texture);
-        vxray_instance.dda_texture = 0;
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_depth_texture);
+        vxray_instance.gbuffer_depth_texture = 0;
+    }
+
+    if (vxray_instance.gbuffer_normal_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_normal_texture);
+        vxray_instance.gbuffer_normal_texture = 0;
+    }
+
+    if (vxray_instance.gbuffer_albedo_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_albedo_texture);
+        vxray_instance.gbuffer_albedo_texture = 0;
     }
 
     if (vxray_instance.display_sampler)
@@ -1617,17 +1665,10 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.display_sampler = 0;
     }
 
-    if (vxray_instance.depth_visualize_pipeline)
+    if (vxray_instance.gbuffer_pipeline)
     {
-        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device,
-                                       vxray_instance.depth_visualize_pipeline);
-        vxray_instance.depth_visualize_pipeline = 0;
-    }
-
-    if (vxray_instance.dda_pipeline)
-    {
-        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.dda_pipeline);
-        vxray_instance.dda_pipeline = 0;
+        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.gbuffer_pipeline);
+        vxray_instance.gbuffer_pipeline = 0;
     }
 
     if (vxray_instance.display_pipeline)

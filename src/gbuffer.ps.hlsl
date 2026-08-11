@@ -1,12 +1,12 @@
 #include "constants.h"
-#include "dda.h"
+#include "gbuffer.h"
 
 struct ps_input
 {
     float2 uv : TEXCOORD0;
 };
 
-ConstantBuffer<dda_uniforms> uniforms : register(b0, space3);
+ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
 Texture2D<float> entry_depth : register(t0, space2);
 SamplerState     entry_sampler : register(s0, space2);
@@ -15,17 +15,39 @@ Texture3D<uint>        voxels : register(t1, space2);
 Texture3D<uint>        bricks : register(t2, space2);
 StructuredBuffer<uint> palette_rgba : register(t3, space2);
 
-float3 unpack_rgba(uint const rgba)
-{
-    float const r = (float)(rgba & 255u) / 255.0;
-    float const g = (float)((rgba >> 8u) & 255u) / 255.0;
-    float const b = (float)((rgba >> 16u) & 255u) / 255.0;
-    return pow(float3(r, g, b), 2.2);
-}
+static uint const VX_NO_CELL = 0xffffffffu;
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
 uint brick_at(int16_t3 const p) { return bricks.Load(int4(p, 0)).r; }
+
+uint pack_voxel_cell(int16_t3 const cell)
+{
+    uint3 const c = uint3(cell);
+    return c.x | (c.y << 10u) | (c.z << 20u);
+}
+
+int16_t3 unpack_voxel_cell(uint const packed)
+{
+    return int16_t3(packed & 1023u, (packed >> 10u) & 1023u, (packed >> 20u) & 1023u);
+}
+
+uint pack_normal(float3 const normal)
+{
+    if (normal.x != 0.0)
+    {
+        return 1u | ((uint)(normal.x < 0.0) << 1u);
+    }
+    if (normal.y != 0.0)
+    {
+        return 4u | ((uint)(normal.y < 0.0) << 3u);
+    }
+    if (normal.z != 0.0)
+    {
+        return 16u | ((uint)(normal.z < 0.0) << 5u);
+    }
+    return 0u;
+}
 
 float3 offset_ray(float3 const p, float3 const n)
 {
@@ -84,20 +106,20 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
     int16_t3 const step_dir = int16_t3(s);
     float3 const   next = float3(local_cell) + max(float3(step_dir), (float3)0.0);
     float3         tnext = (next - local_entry) * inv_dir;
-    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
+    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x;
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
     for (;;)
     {
         if (any((uint16_t3)local_cell >= (uint16_t)VX_BRICK_EXT))
         {
-            return 0u;
+            return VX_NO_CELL;
         }
 
-        uint const v = voxel_at(brick_min + local_cell);
-        if (v > 0u)
+        int16_t3 const cell = brick_min + local_cell;
+        if (voxel_at(cell) > 0u)
         {
-            return v;
+            return pack_voxel_cell(cell);
         }
 
         // Branchless trick: https://www.shadertoy.com/view/4dX3zl
@@ -107,21 +129,20 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
     }
 }
 
-// Good insight into DDA: https://news.ycombinator.com/item?id=43599990
-
-uint multilevel_dda(float3 const origin, float3 const dir)
+// The `entry` (i.e. entrypoint to DDA) is expected to be a point contained in the grid.
+uint multilevel_dda(float3 const entry, float3 const dir)
 {
+    // Good insight into DDA: https://news.ycombinator.com/item?id=43599990
+
     float3 const inv_dir = 1.0 / dir;
     float3 const tdelta = abs(inv_dir);
 
-    float3 const entry = origin;
-    int16_t3     brick_cell = int16_t3(entry / (float)VX_BRICK_EXT);
-
     float3 const   s = sign(dir);
     int16_t3 const step_dir = int16_t3(s);
+    int16_t3       brick_cell = int16_t3(entry / (float)VX_BRICK_EXT);
     float3 const   next = (float3(brick_cell) + max(float3(step_dir), (float3)0.0)) * VX_BRICK_EXT;
     float3         tnext = (next - entry) * inv_dir / (float)VX_BRICK_EXT;
-    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x; // guard against s == 0
+    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x;
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
 
@@ -130,15 +151,15 @@ uint multilevel_dda(float3 const origin, float3 const dir)
     {
         if (any((uint16_t3)brick_cell >= (uint16_t)brick_grid_ext))
         {
-            return 0u;
+            return VX_NO_CELL;
         }
 
         if (brick_at(brick_cell) > 0u)
         {
-            uint const voxel = trace_brick(origin, dir, inv_dir, tdelta, brick_cell);
-            if (voxel > 0u)
+            uint const packed_cell = trace_brick(entry, dir, inv_dir, tdelta, brick_cell);
+            if (packed_cell != VX_NO_CELL)
             {
-                return voxel;
+                return packed_cell;
             }
         }
 
@@ -149,27 +170,80 @@ uint multilevel_dda(float3 const origin, float3 const dir)
     }
 }
 
-float4 main(ps_input const input) : SV_Target0
+struct voxel_intersection
 {
-    float const depth = entry_depth.SampleLevel(entry_sampler, input.uv, 0.0).r;
+    float  distance;
+    float3 normal;
+};
+
+voxel_intersection intersect_voxel(float3 const origin, float3 const dir, int16_t3 const cell)
+{
+    float3 const inv_dir = 1.0 / dir;
+    float3 const cell_min = float3(cell);
+    float3 const cell_max = cell_min + 1.0;
+    float3 const t0 = (cell_min - origin) * inv_dir;
+    float3 const t1 = (cell_max - origin) * inv_dir;
+    float3 const t_near = min(t0, t1);
+    float3 const axis_mask = step(-t_near, min(-t_near.yzx, -t_near.zxy));
+
+    // TODO: this can produce diagonal normals for an exact edge or corner hit
+
+    voxel_intersection result;
+    result.distance = max(t_near.x, max(t_near.y, t_near.z));
+    result.normal = -sign(dir) * axis_mask;
+
+    return result;
+}
+
+struct ps_output
+{
+    uint  albedo : SV_Target0;
+    uint  normal : SV_Target1;
+    float depth : SV_Depth;
+};
+
+ps_output miss()
+{
+    ps_output output;
+    output.albedo = 0u;
+    output.normal = 0u;
+    output.depth = 1.0;
+    return output;
+}
+
+ps_output main(ps_input const input)
+{
+    float const entry_device_depth = entry_depth.SampleLevel(entry_sampler, input.uv, 0.0).r;
     bool const  camera_inside = camera_is_inside_occupied_brick();
-    if (depth >= 1.0 && !camera_inside)
+    if (entry_device_depth >= 1.0 && !camera_inside)
     {
-        return float4(0.02, 0.025, 0.03, 1.0);
+        return miss();
     }
 
     float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 const dir = normalize(unproject(ndc, 1.0) - uniforms.camera_pos.xyz);
     float3 const trace_origin = camera_inside ? offset_ray(uniforms.camera_pos.xyz, dir)
-                                              : offset_ray(unproject(ndc, depth), dir);
+                                              : offset_ray(unproject(ndc, entry_device_depth), dir);
 
-    uint const palette_idx = multilevel_dda(trace_origin, dir);
-    if (palette_idx > 0u)
+    uint const packed_cell = multilevel_dda(trace_origin, dir);
+    if (packed_cell == VX_NO_CELL)
     {
-        return float4(unpack_rgba(palette_rgba[palette_idx]), 1.0);
+        return miss();
     }
-    else
+
+    int16_t3 const           cell = unpack_voxel_cell(packed_cell);
+    voxel_intersection const intersection = intersect_voxel(uniforms.camera_pos.xyz, dir, cell);
+    if (intersection.distance <= 0.0)
     {
-        return float4(0.02, 0.025, 0.03, 1.0);
+        return miss();
     }
+
+    float3 const hit_position = uniforms.camera_pos.xyz + intersection.distance * dir;
+    float4 const clip_position = mul(uniforms.view_projection, float4(hit_position, 1.0));
+
+    ps_output output;
+    output.albedo = palette_rgba[voxel_at(cell)];
+    output.normal = pack_normal(intersection.normal);
+    output.depth = clip_position.z / clip_position.w;
+    return output;
 }

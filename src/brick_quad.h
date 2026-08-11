@@ -12,11 +12,3 @@ typedef struct brick_quad_uniforms
     uint     pad1;
     uint     pad2;
 } brick_quad_uniforms;
-
-typedef struct depth_visualize_uniforms
-{
-    float near_plane;
-    float far_plane;
-    float visualization_range;
-    float pad;
-} depth_visualize_uniforms;
