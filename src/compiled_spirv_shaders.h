@@ -22,3 +22,6 @@ extern size_t const FULLSCREEN_VS_SIZE;
 
 extern uint8_t const GBUFFER_PS_BYTES[];
 extern size_t const GBUFFER_PS_SIZE;
+
+extern uint8_t const RTAO_PS_BYTES[];
+extern size_t const RTAO_PS_SIZE;

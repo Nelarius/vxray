@@ -1,5 +1,7 @@
 #include "display.h"
 
+#include "shared.hlsli"
+
 struct ps_input
 {
     float2 uv : TEXCOORD0;
@@ -7,11 +9,13 @@ struct ps_input
 
 Texture2D<float> surface_depth_texture : register(t0, space2);
 Texture2D<float> entry_depth_texture : register(t1, space2);
-Texture2D<uint>  albedo_texture : register(t2, space2);
-Texture2D<uint>  normal_texture : register(t3, space2);
+Texture2D<float> ambient_visibility_texture : register(t2, space2);
+Texture2D<uint>  albedo_texture : register(t3, space2);
+Texture2D<uint>  normal_texture : register(t4, space2);
 
 SamplerState surface_depth_sampler : register(s0, space2);
 SamplerState entry_depth_sampler : register(s1, space2);
+SamplerState ambient_visibility_sampler : register(s2, space2);
 
 ConstantBuffer<display_uniforms> uniforms : register(b0, space3);
 
@@ -24,13 +28,6 @@ float4 unpack_albedo(uint const rgba)
     float const b = (float)((rgba >> 16u) & 255u) / 255.0;
     float const a = (float)((rgba >> 24u) & 255u) / 255.0;
     return float4(pow(float3(r, g, b), 2.2), a);
-}
-
-float3 unpack_normal(uint const packed)
-{
-    float3 const magnitude = float3(packed & 1u, (packed >> 2u) & 1u, (packed >> 4u) & 1u);
-    float3 const negative = float3((packed >> 1u) & 1u, (packed >> 3u) & 1u, (packed >> 5u) & 1u);
-    return magnitude * (1.0 - 2.0 * negative);
 }
 
 float4 visualize_depth(float const depth)
@@ -60,9 +57,12 @@ float4 main(ps_input const input) : SV_Target0
         uint texture_width;
         uint texture_height;
         albedo_texture.GetDimensions(texture_width, texture_height);
-        int3 const texel = int3(input.uv * uint2(texture_width, texture_height), 0);
-        uint const albedo = albedo_texture.Load(texel).r;
-        return unpack_albedo(albedo);
+        int3 const  texel = int3(input.uv * uint2(texture_width, texture_height), 0);
+        uint const  albedo = albedo_texture.Load(texel).r;
+        float const visibility =
+            ambient_visibility_texture.SampleLevel(ambient_visibility_sampler, input.uv, 0.0);
+        float4 const color = unpack_albedo(albedo);
+        return float4(color.rgb * visibility, color.a);
     }
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL)
     {
@@ -84,6 +84,12 @@ float4 main(ps_input const input) : SV_Target0
         float const depth =
             surface_depth_texture.SampleLevel(surface_depth_sampler, input.uv, 0.0).r;
         return visualize_depth(depth);
+    }
+    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY)
+    {
+        float const visibility =
+            ambient_visibility_texture.SampleLevel(ambient_visibility_sampler, input.uv, 0.0);
+        return float4(visibility, visibility, visibility, 1.0);
     }
 
     float const depth = entry_depth_texture.SampleLevel(entry_depth_sampler, input.uv, 0.0).r;

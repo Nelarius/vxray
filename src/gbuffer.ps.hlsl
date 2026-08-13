@@ -1,6 +1,8 @@
 #include "constants.h"
 #include "gbuffer.h"
 
+#include "shared.hlsli"
+
 struct ps_input
 {
     float2 uv : TEXCOORD0;
@@ -14,8 +16,6 @@ SamplerState     entry_sampler : register(s0, space2);
 Texture3D<uint>        voxels : register(t1, space2);
 Texture3D<uint>        bricks : register(t2, space2);
 StructuredBuffer<uint> palette_rgba : register(t3, space2);
-
-static uint const VX_NO_CELL = 0xffffffffu;
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
@@ -32,40 +32,6 @@ int16_t3 unpack_voxel_cell(uint const packed)
     return int16_t3(packed & 1023u, (packed >> 10u) & 1023u, (packed >> 20u) & 1023u);
 }
 
-uint pack_normal(float3 const normal)
-{
-    if (normal.x != 0.0)
-    {
-        return 1u | ((uint)(normal.x < 0.0) << 1u);
-    }
-    if (normal.y != 0.0)
-    {
-        return 4u | ((uint)(normal.y < 0.0) << 3u);
-    }
-    if (normal.z != 0.0)
-    {
-        return 16u | ((uint)(normal.z < 0.0) << 5u);
-    }
-    return 0u;
-}
-
-float3 offset_ray(float3 const p, float3 const n)
-{
-    // "A Fast and Robust Method for Avoiding Self-Intersection", Ray Tracing Gems
-    float const int_scale = 256.0;
-    float const float_scale = 1e-5;
-    float const origin = 1e-3;
-
-    int3 const   offset = int3(int_scale * n);
-    float3 const po = float3(asfloat(asint(p.x) + ((p.x < 0.0) ? -offset.x : offset.x)),
-                             asfloat(asint(p.y) + ((p.y < 0.0) ? -offset.y : offset.y)),
-                             asfloat(asint(p.z) + ((p.z < 0.0) ? -offset.z : offset.z)));
-
-    return float3((abs(p.x) < origin) ? p.x + float_scale * n.x : po.x,
-                  (abs(p.y) < origin) ? p.y + float_scale * n.y : po.y,
-                  (abs(p.z) < origin) ? p.z + float_scale * n.z : po.z);
-}
-
 bool camera_is_inside_occupied_brick()
 {
     float const  ext = (float)uniforms.grid_ext;
@@ -77,12 +43,6 @@ bool camera_is_inside_occupied_brick()
 
     int16_t3 const camera_brick = int16_t3(camera_position / (float)VX_BRICK_EXT);
     return brick_at(camera_brick) > 0u;
-}
-
-float3 unproject(float2 const ndc, float const depth)
-{
-    float4 const world = mul(uniforms.inverse_view_projection, float4(ndc, depth, 1.0));
-    return world.xyz / world.w;
 }
 
 float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
@@ -221,9 +181,12 @@ ps_output main(ps_input const input)
     }
 
     float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    float3 const dir = normalize(unproject(ndc, 1.0) - uniforms.camera_pos.xyz);
-    float3 const trace_origin = camera_inside ? offset_ray(uniforms.camera_pos.xyz, dir)
-                                              : offset_ray(unproject(ndc, entry_device_depth), dir);
+    float3 const dir =
+        normalize(unproject(uniforms.inverse_view_projection, ndc, 1.0) - uniforms.camera_pos.xyz);
+    float3 const trace_origin =
+        camera_inside
+            ? offset_ray(uniforms.camera_pos.xyz, dir)
+            : offset_ray(unproject(uniforms.inverse_view_projection, ndc, entry_device_depth), dir);
 
     uint const packed_cell = multilevel_dda(trace_origin, dir);
     if (packed_cell == VX_NO_CELL)
