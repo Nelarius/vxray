@@ -54,6 +54,32 @@ float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, flo
     return max(max(lo.x, lo.y), max(lo.z, 0.0));
 }
 
+float3 reconstruct_brick_pos(float3 const reconstructed_pos, float3 const dir)
+{
+    float const  brick_ext = (float)VX_BRICK_EXT;
+    float3 const brick_pos = reconstructed_pos / brick_ext;
+    float3 const rounded_brick_pos = round(brick_pos);
+    float3 const plane_distance = abs(brick_pos - rounded_brick_pos);
+
+    float3 face_axis;
+    if (plane_distance.x <= plane_distance.y && plane_distance.x <= plane_distance.z)
+    {
+        face_axis = float3(1.0, 0.0, 0.0);
+    }
+    else if (plane_distance.y <= plane_distance.z)
+    {
+        face_axis = float3(0.0, 1.0, 0.0);
+    }
+    else
+    {
+        face_axis = float3(0.0, 0.0, 1.0);
+    }
+
+    float3 const face_pos = lerp(reconstructed_pos, rounded_brick_pos * brick_ext, face_axis);
+    float3 const inward_normal = face_axis * sign(dir);
+    return offset_ray(face_pos, inward_normal);
+}
+
 uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
                  int16_t3 const brick_cell)
 {
@@ -186,7 +212,8 @@ ps_output main(ps_input const input)
     float3 const trace_origin =
         camera_inside
             ? offset_ray(uniforms.camera_pos.xyz, dir)
-            : offset_ray(unproject(uniforms.inverse_view_projection, ndc, entry_device_depth), dir);
+            : reconstruct_brick_pos(
+                  unproject(uniforms.inverse_view_projection, ndc, entry_device_depth), dir);
 
     uint const packed_cell = multilevel_dda(trace_origin, dir);
     if (packed_cell == VX_NO_CELL)
