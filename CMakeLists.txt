@@ -31,7 +31,7 @@ set(VXRAY_SHADER_SOURCES
         display.ps.hlsl
         fullscreen.vs.hlsl
         gbuffer.ps.hlsl
-        rtao.ps.hlsl)
+        rtao.cs.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 set(VXRAY_COMPILED_METAL_SHADERS_H ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.h)
@@ -55,6 +55,7 @@ add_custom_command(
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/display.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/gbuffer.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/rtao.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/spatial_hash.hlsli
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/shared.hlsli)
 add_custom_target(compile-vxray-shaders DEPENDS ${VXRAY_COMPILED_METAL_SHADERS_C} ${VXRAY_COMPILED_SPIRV_SHADERS_C})
 add_dependencies(compile-vxray-shaders shader-compiler)
@@ -94,7 +95,8 @@ set(VXRAY_SOURCES
         gbuffer.ps.hlsl
         hlsl_shim.h
         rtao.h
-        rtao.ps.hlsl
+        rtao.cs.hlsl
+        spatial_hash.hlsli
         shared.hlsli
         vxray.c)
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)

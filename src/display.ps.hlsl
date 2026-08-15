@@ -1,25 +1,27 @@
 #include "display.h"
+#include "rtao.h"
 
-#include "shared.hlsli"
+#include "spatial_hash.hlsli"
 
 struct ps_input
 {
-    float2 uv : TEXCOORD0;
+    float4 position : SV_Position;
 };
 
-Texture2D<float> surface_depth_texture : register(t0, space2);
-Texture2D<float> entry_depth_texture : register(t1, space2);
-Texture2D<float> ambient_visibility_texture : register(t2, space2);
-Texture2D<uint>  albedo_texture : register(t3, space2);
-Texture2D<uint>  normal_texture : register(t4, space2);
+Texture2D<float>       depth_tex : register(t0, space2);
+Texture2D<float>       brick_depth_tex : register(t1, space2);
+Texture2D<uint>        albedo_tex : register(t2, space2);
+Texture2D<uint>        normal_tex : register(t3, space2);
+StructuredBuffer<uint> hash_checksums : register(t4, space2);
+StructuredBuffer<uint> hash_payloads : register(t5, space2);
 
-SamplerState surface_depth_sampler : register(s0, space2);
-SamplerState entry_depth_sampler : register(s1, space2);
-SamplerState ambient_visibility_sampler : register(s2, space2);
+SamplerState depth_sampler : register(s0, space2);
+SamplerState brick_depth_sampler : register(s1, space2);
 
 ConstantBuffer<display_uniforms> uniforms : register(b0, space3);
 
 static float4 const BACKGROUND_COLOR = float4(0.02, 0.025, 0.03, 1.0);
+static float4 const CACHE_FAILURE_COLOR = float4(1.0, 0.0, 1.0, 1.0);
 
 float4 unpack_albedo(uint const rgba)
 {
@@ -37,61 +39,115 @@ float4 visualize_depth(float const depth)
         return BACKGROUND_COLOR;
     }
 
-    float const linear_depth =
-        uniforms.near_plane * uniforms.far_plane /
-        (uniforms.far_plane - depth * (uniforms.far_plane - uniforms.near_plane));
+    float const linear_depth = linear_view_depth(depth, uniforms.near_plane, uniforms.far_plane);
     float const shade = 1.0 - saturate(linear_depth / uniforms.visualization_range);
     return float4(shade, shade, shade, 1.0);
 }
 
+bool spatial_hash_lookup_visibility(float2 const uv, float const surface_depth, float3 const normal,
+                                    out float visibility)
+{
+    visibility = 0.0;
+    float3 const face_position =
+        reconstruct_position(uniforms.inverse_view_projection, uv, surface_depth, normal);
+    float const view_depth =
+        linear_view_depth(surface_depth, uniforms.near_plane, uniforms.far_plane);
+    float const cell_size = compute_cell_size(view_depth, uniforms.vertical_fov,
+                                              uniforms.render_height, uniforms.sp, uniforms.smin);
+    spatial_hash_key const key = make_spatial_hash_key(face_position, normal, cell_size);
+
+    uint index = key.hash & VX_AO_HASH_MASK;
+    for (uint probe = 0u; probe < VX_AO_HASH_PROBE_COUNT; ++probe)
+    {
+        uint const checksum = hash_checksums[index];
+        if (checksum == key.checksum)
+        {
+            uint const payload = hash_payloads[index];
+            uint const sample_count = payload & 0xffffu;
+            if (sample_count == 0u)
+            {
+                return false;
+            }
+            visibility = 1.0 - (float)(payload >> 16u) / (float)sample_count;
+            return true;
+        }
+        if (checksum == 0u)
+        {
+            return false;
+        }
+        index = (index + 1u) & VX_AO_HASH_MASK;
+    }
+    return false;
+}
+
+float3 cell_size_color(float const cell_size, float const smin)
+{
+    // Adjacent powers of two receive distinct colors, including sizes below smin.
+    float3 const palette[8] = {
+        float3(0.1216, 0.4667, 0.7059), float3(1.0000, 0.4980, 0.0549),
+        float3(0.1725, 0.6275, 0.1725), float3(0.8392, 0.1529, 0.1569),
+        float3(0.5804, 0.4039, 0.7412), float3(0.5490, 0.3373, 0.2941),
+        float3(0.8902, 0.4667, 0.7608), float3(0.4980, 0.4980, 0.4980),
+    };
+    int const exponent = (int)round(log2(cell_size / smin));
+    return palette[(uint)exponent & 7u];
+}
+
 float4 main(ps_input const input) : SV_Target0
 {
-    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO)
+    uint width, height;
+    depth_tex.GetDimensions(width, height);
+    uint2 const  pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
+    float2 const pixel_uv = (float2(pixel) + 0.5) / float2(width, height);
+    float const  surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
+
+    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY ||
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL ||
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_CELL_SIZE)
     {
-        float const depth =
-            surface_depth_texture.SampleLevel(surface_depth_sampler, input.uv, 0.0).r;
-        if (depth >= 1.0)
+        if (surface_depth >= 1.0)
         {
             return BACKGROUND_COLOR;
         }
-        uint texture_width;
-        uint texture_height;
-        albedo_texture.GetDimensions(texture_width, texture_height);
-        int3 const  texel = int3(input.uv * uint2(texture_width, texture_height), 0);
-        uint const  albedo = albedo_texture.Load(texel).r;
-        float const visibility =
-            ambient_visibility_texture.SampleLevel(ambient_visibility_sampler, input.uv, 0.0);
-        float4 const color = unpack_albedo(albedo);
+
+        int3 const   texel = int3(pixel, 0);
+        uint const   packed_normal = normal_tex.Load(texel).r;
+        float3 const normal = unpack_normal(packed_normal);
+
+        if (uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL)
+        {
+            return float4(unpack_normal(packed_normal) * 0.5 + 0.5, 1.0);
+        }
+        if (uniforms.texture_type == VX_DISPLAY_TEXTURE_CELL_SIZE)
+        {
+            float const view_depth =
+                linear_view_depth(surface_depth, uniforms.near_plane, uniforms.far_plane);
+            float const cell_size =
+                compute_cell_size(view_depth, uniforms.vertical_fov, uniforms.render_height,
+                                  uniforms.sp, uniforms.smin);
+            return float4(cell_size_color(cell_size, uniforms.smin), 1.0);
+        }
+
+        float visibility;
+        if (!spatial_hash_lookup_visibility(pixel_uv, surface_depth, normal, visibility))
+        {
+            return CACHE_FAILURE_COLOR;
+        }
+        if (uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY)
+        {
+            return float4(visibility, visibility, visibility, 1.0);
+        }
+
+        float4 const color = unpack_albedo(albedo_tex.Load(texel).r);
         return float4(color.rgb * visibility, color.a);
     }
-    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL)
-    {
-        float const depth =
-            surface_depth_texture.SampleLevel(surface_depth_sampler, input.uv, 0.0).r;
-        if (depth >= 1.0)
-        {
-            return BACKGROUND_COLOR;
-        }
-        uint texture_width;
-        uint texture_height;
-        normal_texture.GetDimensions(texture_width, texture_height);
-        int3 const texel = int3(input.uv * uint2(texture_width, texture_height), 0);
-        uint const packed = normal_texture.Load(texel).r;
-        return float4(unpack_normal(packed) * 0.5 + 0.5, 1.0);
-    }
+
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_SURFACE_DEPTH)
     {
-        float const depth =
-            surface_depth_texture.SampleLevel(surface_depth_sampler, input.uv, 0.0).r;
-        return visualize_depth(depth);
-    }
-    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY)
-    {
-        float const visibility =
-            ambient_visibility_texture.SampleLevel(ambient_visibility_sampler, input.uv, 0.0);
-        return float4(visibility, visibility, visibility, 1.0);
+        return visualize_depth(surface_depth);
     }
 
-    float const depth = entry_depth_texture.SampleLevel(entry_depth_sampler, input.uv, 0.0).r;
-    return visualize_depth(depth);
+    float const entry_depth = brick_depth_tex.SampleLevel(brick_depth_sampler, pixel_uv, 0.0).r;
+    return visualize_depth(entry_depth);
 }
