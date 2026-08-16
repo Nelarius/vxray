@@ -42,7 +42,6 @@ static_assert(sizeof(brick_quad_uniforms) == 96, "brick-quad uniform layout must
 static_assert(sizeof(display_uniforms) == 32, "display uniform layout must match HLSL");
 static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
 static_assert(sizeof(rtao_uniforms) == 128, "RTAO uniform layout must match HLSL");
-static_assert(sizeof(rtao_filter_uniforms) == 80, "RTAO filter uniform layout must match HLSL");
 static_assert(1024 / VX_BRICK_EXT <= 256, "brick-grid coordinates must fit in packed face records");
 
 #if defined(SDL_PLATFORM_APPLE)
@@ -617,8 +616,6 @@ typedef struct vxray
     int       display_texture;
     float     ao_sp;
     float     ao_smin;
-    float     ao_filter_sigma_depth;
-    int       ao_filter_iterations;
     uint32_t  frame_index;
 
     // Voxel grid
@@ -630,7 +627,6 @@ typedef struct vxray
     SDL_GPUGraphicsPipeline* gbuffer_pipeline;
     SDL_GPUComputePipeline*  rtao_pipeline;
     SDL_GPUGraphicsPipeline* rtao_visibility_pipeline;
-    SDL_GPUGraphicsPipeline* rtao_filter_pipeline;
     SDL_GPUGraphicsPipeline* display_pipeline;
     SDL_GPUGraphicsPipeline* brick_quad_pipeline;
     SDL_GPUComputePipeline*  brick_quad_compute_pipeline;
@@ -641,10 +637,10 @@ typedef struct vxray
     SDL_GPUTexture*          gbuffer_albedo_texture;
     SDL_GPUTexture*          gbuffer_normal_texture;
     SDL_GPUTexture*          gbuffer_depth_texture;
-    SDL_GPUTexture*          rtao_visibility_texture1;
-    SDL_GPUTexture*          rtao_visibility_texture2;
+    SDL_GPUTexture*          rtao_visibility_texture;
     uint32_t                 render_width;
     uint32_t                 render_height;
+    SDL_GPUSampler*          display_sampler;
     SDL_GPUBuffer*           visible_faces_buffer;
     SDL_GPUBuffer*           indirect_draw_buffer;
     SDL_GPUTransferBuffer*   indirect_reset_transfer_buffer;
@@ -664,9 +660,8 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
 
     if (vxray_instance.entry_depth_texture && vxray_instance.entry_brick_texture &&
         vxray_instance.gbuffer_albedo_texture && vxray_instance.gbuffer_normal_texture &&
-        vxray_instance.gbuffer_depth_texture && vxray_instance.rtao_visibility_texture1 &&
-        vxray_instance.rtao_visibility_texture2 && vxray_instance.render_width == width &&
-        vxray_instance.render_height == height)
+        vxray_instance.gbuffer_depth_texture && vxray_instance.rtao_visibility_texture &&
+        vxray_instance.render_width == width && vxray_instance.render_height == height)
     {
         return true;
     }
@@ -752,10 +747,9 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     SDL_GPUTexture* const gbuffer_depth_texture = SDL_CreateGPUTexture(
         vxray_instance.gpu_device,
         &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                                             SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                    .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                                    .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                     .width = width,
                                     .height = height,
                                     .layer_count_or_depth = 1,
@@ -772,45 +766,21 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const rtao_visibility_texture1 = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const rtao_visibility_texture = SDL_CreateGPUTexture(
         vxray_instance.gpu_device,
         &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
                                     .format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
                                     .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
                                     .width = width,
                                     .height = height,
                                     .layer_count_or_depth = 1,
                                     .num_levels = 1,
                                     .sample_count = SDL_GPU_SAMPLECOUNT_1});
-    if (!rtao_visibility_texture1)
+    if (!rtao_visibility_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create RTAO visibility texture: %s",
                      SDL_GetError());
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_depth_texture);
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_normal_texture);
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_albedo_texture);
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_brick_texture);
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_depth_texture);
-        return false;
-    }
-
-    SDL_GPUTexture* const rtao_visibility_texture2 = SDL_CreateGPUTexture(
-        vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
-    if (!rtao_visibility_texture2)
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create second RTAO visibility texture: %s",
-                     SDL_GetError());
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_visibility_texture1);
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_depth_texture);
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_normal_texture);
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_albedo_texture);
@@ -839,21 +809,16 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_depth_texture);
     }
-    if (vxray_instance.rtao_visibility_texture1)
+    if (vxray_instance.rtao_visibility_texture)
     {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_visibility_texture1);
-    }
-    if (vxray_instance.rtao_visibility_texture2)
-    {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_visibility_texture2);
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_visibility_texture);
     }
     vxray_instance.entry_depth_texture = entry_depth_texture;
     vxray_instance.entry_brick_texture = entry_brick_texture;
     vxray_instance.gbuffer_albedo_texture = gbuffer_albedo_texture;
     vxray_instance.gbuffer_normal_texture = gbuffer_normal_texture;
     vxray_instance.gbuffer_depth_texture = gbuffer_depth_texture;
-    vxray_instance.rtao_visibility_texture1 = rtao_visibility_texture1;
-    vxray_instance.rtao_visibility_texture2 = rtao_visibility_texture2;
+    vxray_instance.rtao_visibility_texture = rtao_visibility_texture;
     vxray_instance.render_width = width;
     vxray_instance.render_height = height;
     return true;
@@ -865,8 +830,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
     vxray_instance.ao_sp = 10.f;
     vxray_instance.ao_smin = 0.07f;
-    vxray_instance.ao_filter_sigma_depth = 0.1f;
-    vxray_instance.ao_filter_iterations = 3;
 
     if (argc < 2 || argc > 3)
     {
@@ -1093,12 +1056,18 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
                                              .cull_mode = SDL_GPU_CULLMODE_BACK,
                                              .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
+                .depth_stencil_state =
+                    (SDL_GPUDepthStencilState){.compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+                                               .enable_depth_test = true,
+                                               .enable_depth_write = true},
                 .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 3,
-                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT},
-                        {.format = SDL_GPU_TEXTUREFORMAT_R8_UINT},
-                        {.format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT}}}});
+                    .num_color_targets = 2,
+                    .color_target_descriptions =
+                        (SDL_GPUColorTargetDescription[]){
+                            {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT},
+                            {.format = SDL_GPU_TEXTUREFORMAT_R8_UINT}},
+                    .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                    .has_depth_stencil_target = true}});
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
         if (!vxray_instance.gbuffer_pipeline)
@@ -1117,7 +1086,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                             .code = RTAO_CS_BYTES,
                                             .entrypoint = GPU_SHADER_ENTRYPOINT,
                                             .format = GPU_SHADER_FORMAT,
-                                            .num_readonly_storage_textures = 3,
+                                            .num_samplers = 1,
+                                            .num_readonly_storage_textures = 2,
                                             .num_readwrite_storage_buffers = 3,
                                             .num_uniform_buffers = 1,
                                             .threadcount_x = 8,
@@ -1143,7 +1113,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_storage_textures = 2,
+                                                 .num_samplers = 1,
+                                                 .num_storage_textures = 1,
                                                  .num_storage_buffers = 2,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -1189,64 +1160,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
     }
 
-    // RTAO wavelet filter pipeline
-
-    {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
-                                                 .code = FULLSCREEN_VS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX};
-        SDL_GPUShaderCreateInfo const ps_info = {.code_size = RTAO_FILTER_PS_SIZE,
-                                                 .code = RTAO_FILTER_PS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_storage_textures = 3,
-                                                 .num_uniform_buffers = 1};
-        SDL_GPUShader* const          vertex_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
-        SDL_GPUShader* const fragment_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
-        if (!vertex_shader || !fragment_shader)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create RTAO filter shaders: %s",
-                         SDL_GetError());
-            if (fragment_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-            }
-            if (vertex_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-            }
-            return SDL_APP_FAILURE;
-        }
-
-        vxray_instance.rtao_filter_pipeline = SDL_CreateGPUGraphicsPipeline(
-            vxray_instance.gpu_device,
-            &(SDL_GPUGraphicsPipelineCreateInfo){
-                .vertex_shader = vertex_shader,
-                .fragment_shader = fragment_shader,
-                .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-                .rasterizer_state =
-                    (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
-                                             .cull_mode = SDL_GPU_CULLMODE_BACK,
-                                             .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
-                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 1,
-                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT}}}});
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-        if (!vxray_instance.rtao_filter_pipeline)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create RTAO filter pipeline: %s",
-                         SDL_GetError());
-            return SDL_APP_FAILURE;
-        }
-    }
-
     // Fullscreen display pipeline
 
     {
@@ -1260,7 +1173,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_storage_textures = 5,
+                                                 .num_samplers = 2,
+                                                 .num_storage_textures = 3,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
@@ -1304,6 +1218,20 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                          SDL_GetError());
             return SDL_APP_FAILURE;
         }
+    }
+
+    vxray_instance.display_sampler = SDL_CreateGPUSampler(
+        vxray_instance.gpu_device,
+        &(SDL_GPUSamplerCreateInfo){.min_filter = SDL_GPU_FILTER_NEAREST,
+                                    .mag_filter = SDL_GPU_FILTER_NEAREST,
+                                    .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
+                                    .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+                                    .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+                                    .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE});
+    if (!vxray_instance.display_sampler)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display sampler: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
     }
 
     {
@@ -1675,9 +1603,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     igSliderFloat("sp", &vxray_instance.ao_sp, 1.f, 16.f, "%.1f px", 0);
     igSliderFloat("smin", &vxray_instance.ao_smin, 0.01f, 2.f, "%.3f",
                   ImGuiSliderFlags_Logarithmic);
-    igSliderFloat("AO filter sigma depth", &vxray_instance.ao_filter_sigma_depth, 0.01f, 10.f,
-                  "%.2f", ImGuiSliderFlags_Logarithmic);
-    igSliderInt("AO filter iterations", &vxray_instance.ao_filter_iterations, 0, 5, "%d", 0);
     igText("Face capacity: %u", vxray_instance.face_capacity);
     igEnd();
     igRender();
@@ -1728,9 +1653,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(height > 0u);
     assert(isfinite(vxray_instance.ao_sp) && vxray_instance.ao_sp > 0.f);
     assert(isfinite(vxray_instance.ao_smin) && vxray_instance.ao_smin > 0.f);
-    assert(isfinite(vxray_instance.ao_filter_sigma_depth) &&
-           vxray_instance.ao_filter_sigma_depth > 0.f);
-    assert(vxray_instance.ao_filter_iterations >= 0 && vxray_instance.ao_filter_iterations <= 5);
 
     vec3s const forward = vx_camera_forward(camera);
     vec3s const world_up = {0.f, 1.f, 0.f};
@@ -1883,14 +1805,18 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
          .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
          .load_op = SDL_GPU_LOADOP_CLEAR,
          .store_op = SDL_GPU_STOREOP_STORE,
-         .cycle = true},
-        {.texture = vxray_instance.gbuffer_depth_texture,
-         .clear_color = (SDL_FColor){1.f, 0.f, 0.f, 0.f},
-         .load_op = SDL_GPU_LOADOP_CLEAR,
-         .store_op = SDL_GPU_STOREOP_STORE,
          .cycle = true}};
-    SDL_GPURenderPass* const gbuffer_pass = SDL_BeginGPURenderPass(
-        cmd_buffer, gbuffer_target_info, SDL_arraysize(gbuffer_target_info), 0);
+    SDL_GPUDepthStencilTargetInfo const gbuffer_depth_target_info = {
+        .texture = vxray_instance.gbuffer_depth_texture,
+        .clear_depth = 1.f,
+        .load_op = SDL_GPU_LOADOP_CLEAR,
+        .store_op = SDL_GPU_STOREOP_STORE,
+        .stencil_load_op = SDL_GPU_LOADOP_DONT_CARE,
+        .stencil_store_op = SDL_GPU_STOREOP_DONT_CARE,
+        .cycle = true};
+    SDL_GPURenderPass* const gbuffer_pass =
+        SDL_BeginGPURenderPass(cmd_buffer, gbuffer_target_info, SDL_arraysize(gbuffer_target_info),
+                               &gbuffer_depth_target_info);
     assert(gbuffer_pass);
     SDL_BindGPUGraphicsPipeline(gbuffer_pass, vxray_instance.gbuffer_pipeline);
     SDL_GPUTexture* const storage_textures[] = {
@@ -1919,8 +1845,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         cmd_buffer, 0, 0, rtao_writable_buffers, SDL_arraysize(rtao_writable_buffers));
     assert(rtao_pass);
     SDL_BindGPUComputePipeline(rtao_pass, vxray_instance.rtao_pipeline);
+    SDL_GPUTextureSamplerBinding const rtao_depth_binding = {
+        .texture = vxray_instance.gbuffer_depth_texture, .sampler = vxray_instance.display_sampler};
+    SDL_BindGPUComputeSamplers(rtao_pass, 0, &rtao_depth_binding, 1);
     SDL_GPUTexture* const rtao_storage_textures[] = {
-        vxray_instance.gbuffer_depth_texture,
         vxray_instance.gbuffer_normal_texture,
         vxray_instance.voxel_texture,
     };
@@ -1934,7 +1862,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     // Resolve the spatial cache into a screen-space ambient-visibility texture.
 
     SDL_GPUColorTargetInfo const rtao_target_info = {
-        .texture = vxray_instance.rtao_visibility_texture1,
+        .texture = vxray_instance.rtao_visibility_texture,
         .clear_color = (SDL_FColor){-1.f, 0.f, 0.f, 0.f},
         .load_op = SDL_GPU_LOADOP_CLEAR,
         .store_op = SDL_GPU_STOREOP_STORE,
@@ -1943,8 +1871,11 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         SDL_BeginGPURenderPass(cmd_buffer, &rtao_target_info, 1, 0);
     assert(rtao_visibility_pass);
     SDL_BindGPUGraphicsPipeline(rtao_visibility_pass, vxray_instance.rtao_visibility_pipeline);
+    SDL_GPUTextureSamplerBinding const rtao_visibility_depth_binding = {
+        .texture = vxray_instance.gbuffer_depth_texture, .sampler = vxray_instance.display_sampler};
+    SDL_BindGPUFragmentSamplers(rtao_visibility_pass, 0, &rtao_visibility_depth_binding, 1);
     SDL_GPUTexture* const rtao_visibility_storage_textures[] = {
-        vxray_instance.gbuffer_depth_texture, vxray_instance.gbuffer_normal_texture};
+        vxray_instance.gbuffer_normal_texture};
     SDL_BindGPUFragmentStorageTextures(rtao_visibility_pass, 0, rtao_visibility_storage_textures,
                                        SDL_arraysize(rtao_visibility_storage_textures));
     SDL_GPUBuffer* const rtao_visibility_storage_buffers[] = {
@@ -1957,40 +1888,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_DrawGPUPrimitives(rtao_visibility_pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(rtao_visibility_pass);
 
-    // Filter ambient visibility with an edge-aware A-Trous wavelet kernel.
-
-    for (int iteration = 0; iteration < vxray_instance.ao_filter_iterations; ++iteration)
-    {
-        SDL_GPUColorTargetInfo const filter_target_info = {
-            .texture = vxray_instance.rtao_visibility_texture2,
-            .load_op = SDL_GPU_LOADOP_DONT_CARE,
-            .store_op = SDL_GPU_STOREOP_STORE,
-            .cycle = true};
-        SDL_GPURenderPass* const filter_pass =
-            SDL_BeginGPURenderPass(cmd_buffer, &filter_target_info, 1, 0);
-        assert(filter_pass);
-        SDL_BindGPUGraphicsPipeline(filter_pass, vxray_instance.rtao_filter_pipeline);
-        SDL_GPUTexture* const filter_storage_textures[] = {vxray_instance.rtao_visibility_texture1,
-                                                           vxray_instance.gbuffer_depth_texture,
-                                                           vxray_instance.gbuffer_normal_texture};
-        SDL_BindGPUFragmentStorageTextures(filter_pass, 0, filter_storage_textures,
-                                           SDL_arraysize(filter_storage_textures));
-        rtao_filter_uniforms const filter_uniform_data = {
-            .view_matrix = vx_float4x4_from_mat4(view),
-            .sigma_depth = vxray_instance.ao_filter_sigma_depth,
-            .step_width = 1u << (uint32_t)iteration,
-            .near_plane = near_plane,
-            .far_plane = far_plane};
-        SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &filter_uniform_data,
-                                       sizeof(filter_uniform_data));
-        SDL_DrawGPUPrimitives(filter_pass, 3, 1, 0, 0);
-        SDL_EndGPURenderPass(filter_pass);
-
-        SDL_GPUTexture* const previous_input = vxray_instance.rtao_visibility_texture1;
-        vxray_instance.rtao_visibility_texture1 = vxray_instance.rtao_visibility_texture2;
-        vxray_instance.rtao_visibility_texture2 = previous_input;
-    }
-
     // Display the selected intermediate texture on the swapchain.
 
     SDL_GPUColorTargetInfo const color_target_info = {.texture = swapchain_texture,
@@ -2002,9 +1899,16 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(render_pass);
 
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.display_pipeline);
+    SDL_GPUTextureSamplerBinding const display_bindings[] = {
+        {.texture = vxray_instance.gbuffer_depth_texture,
+         .sampler = vxray_instance.display_sampler},
+        {.texture = vxray_instance.rtao_visibility_texture,
+         .sampler = vxray_instance.display_sampler},
+    };
+    SDL_BindGPUFragmentSamplers(render_pass, 0, display_bindings, SDL_arraysize(display_bindings));
     SDL_GPUTexture* const display_storage_textures[] = {
-        vxray_instance.gbuffer_depth_texture,  vxray_instance.rtao_visibility_texture1,
-        vxray_instance.entry_brick_texture,    vxray_instance.gbuffer_albedo_texture,
+        vxray_instance.entry_brick_texture,
+        vxray_instance.gbuffer_albedo_texture,
         vxray_instance.gbuffer_normal_texture,
     };
     SDL_BindGPUFragmentStorageTextures(render_pass, 0, display_storage_textures,
@@ -2123,16 +2027,10 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.gbuffer_depth_texture = 0;
     }
 
-    if (vxray_instance.rtao_visibility_texture1)
+    if (vxray_instance.rtao_visibility_texture)
     {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_visibility_texture1);
-        vxray_instance.rtao_visibility_texture1 = 0;
-    }
-
-    if (vxray_instance.rtao_visibility_texture2)
-    {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_visibility_texture2);
-        vxray_instance.rtao_visibility_texture2 = 0;
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_visibility_texture);
+        vxray_instance.rtao_visibility_texture = 0;
     }
 
     if (vxray_instance.gbuffer_normal_texture)
@@ -2145,6 +2043,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_albedo_texture);
         vxray_instance.gbuffer_albedo_texture = 0;
+    }
+
+    if (vxray_instance.display_sampler)
+    {
+        SDL_ReleaseGPUSampler(vxray_instance.gpu_device, vxray_instance.display_sampler);
+        vxray_instance.display_sampler = 0;
     }
 
     if (vxray_instance.gbuffer_pipeline)
@@ -2164,13 +2068,6 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device,
                                        vxray_instance.rtao_visibility_pipeline);
         vxray_instance.rtao_visibility_pipeline = 0;
-    }
-
-    if (vxray_instance.rtao_filter_pipeline)
-    {
-        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device,
-                                       vxray_instance.rtao_filter_pipeline);
-        vxray_instance.rtao_filter_pipeline = 0;
     }
 
     if (vxray_instance.display_pipeline)

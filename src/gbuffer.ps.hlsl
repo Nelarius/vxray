@@ -161,7 +161,7 @@ struct ps_output
 {
     uint  albedo : SV_Target0;
     uint  normal : SV_Target1;
-    float depth : SV_Target2;
+    float depth : SV_Depth;
 };
 
 ps_output miss()
