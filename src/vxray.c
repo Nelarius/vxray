@@ -1723,7 +1723,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_BindGPUComputeStorageTextures(rtao_pass, 0, rtao_storage_textures,
                                       SDL_arraysize(rtao_storage_textures));
     SDL_PushGPUComputeUniformData(cmd_buffer, 0, &rtao_uniform_data, sizeof(rtao_uniform_data));
-    SDL_DispatchGPUCompute(rtao_pass, (width + 7u) / 8u, (height + 7u) / 8u, 1);
+    uint32_t const rtao_width = (width + 1u) / 2u;
+    SDL_DispatchGPUCompute(rtao_pass, (rtao_width + 7u) / 8u, (height + 7u) / 8u, 1);
     SDL_EndGPUComputePass(rtao_pass);
 
     // Display the selected intermediate texture on the swapchain.

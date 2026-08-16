@@ -7,7 +7,7 @@
 #define VX_AO_HASH_PROBE_COUNT 8u
 #define VX_AO_MAX_CELL_AGE 20u
 #define VX_AO_SAMPLE_LIMIT 500u
-#define VX_AO_RAYS_PER_PIXEL 1u
+#define VX_AO_RAYS_PER_PIXEL 2u
 
 typedef struct rtao_uniforms
 {
