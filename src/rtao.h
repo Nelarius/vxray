@@ -26,3 +26,12 @@ typedef struct rtao_uniforms
     uint     pad1;
     uint     pad2;
 } rtao_uniforms;
+
+typedef struct rtao_filter_uniforms
+{
+    float4x4 view_matrix;
+    float    sigma_depth;
+    uint     step_width;
+    float    near_plane;
+    float    far_plane;
+} rtao_filter_uniforms;

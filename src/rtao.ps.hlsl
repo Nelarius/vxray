@@ -12,8 +12,6 @@ Texture2D<uint>        normal_tex : register(t1, space2);
 StructuredBuffer<uint> hash_checksums : register(t2, space2);
 StructuredBuffer<uint> hash_payloads : register(t3, space2);
 
-SamplerState depth_sampler : register(s0, space2);
-
 ConstantBuffer<rtao_uniforms> uniforms : register(b0, space3);
 
 static float const CACHE_FAILURE_VISIBILITY = -1.0;
@@ -24,7 +22,7 @@ float main(ps_input const input) : SV_Target0
     depth_tex.GetDimensions(width, height);
     uint2 const  pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
     float2 const uv = (float2(pixel) + 0.5) / float2(width, height);
-    float const  depth = depth_tex.SampleLevel(depth_sampler, uv, 0.0).r;
+    float const  depth = depth_tex.Load(int3(pixel, 0)).r;
     if (depth >= 1.0)
     {
         return CACHE_FAILURE_VISIBILITY;
