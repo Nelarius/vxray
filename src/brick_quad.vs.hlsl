@@ -4,6 +4,12 @@ StructuredBuffer<uint> visible_faces : register(t0, space0);
 
 ConstantBuffer<brick_quad_uniforms> uniforms : register(b0, space1);
 
+struct vs_output
+{
+    float4               position : SV_Position;
+    nointerpolation uint packed_brick : TEXCOORD0;
+};
+
 float3 face_corner(uint const face, float2 const corner)
 {
     float const edge = (float)VX_BRICK_EXT;
@@ -30,8 +36,7 @@ float3 face_corner(uint const face, float2 const corner)
     return float3(corner.x, corner.y, 1.0) * edge;
 }
 
-float4 main(uint const vertex_id : SV_VertexID, uint const instance_id : SV_InstanceID)
-    : SV_Position
+vs_output main(uint const vertex_id : SV_VertexID, uint const instance_id : SV_InstanceID)
 {
     uint const   corner_indices[6] = {0u, 1u, 2u, 0u, 2u, 3u};
     float2 const corners[4] = {
@@ -47,5 +52,9 @@ float4 main(uint const vertex_id : SV_VertexID, uint const instance_id : SV_Inst
     uint const   face = (face_data >> 24u) & 0x7u;
     float3 const world_position =
         float3(brick * VX_BRICK_EXT) + face_corner(face, corners[corner_indices[vertex_id]]);
-    return mul(uniforms.view_projection, float4(world_position, 1.0));
+
+    vs_output output;
+    output.position = mul(uniforms.view_projection, float4(world_position, 1.0));
+    output.packed_brick = face_data & 0x00ffffffu;
+    return output;
 }

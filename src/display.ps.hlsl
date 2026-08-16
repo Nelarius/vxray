@@ -1,3 +1,4 @@
+#include "constants.h"
 #include "display.h"
 #include "rtao.h"
 
@@ -9,14 +10,13 @@ struct ps_input
 };
 
 Texture2D<float>       depth_tex : register(t0, space2);
-Texture2D<float>       brick_depth_tex : register(t1, space2);
+Texture2D<uint>        entry_bricks : register(t1, space2);
 Texture2D<uint>        albedo_tex : register(t2, space2);
 Texture2D<uint>        normal_tex : register(t3, space2);
 StructuredBuffer<uint> hash_checksums : register(t4, space2);
 StructuredBuffer<uint> hash_payloads : register(t5, space2);
 
 SamplerState depth_sampler : register(s0, space2);
-SamplerState brick_depth_sampler : register(s1, space2);
 
 ConstantBuffer<display_uniforms> uniforms : register(b0, space3);
 
@@ -40,8 +40,22 @@ float4 visualize_depth(float const depth)
     }
 
     float const linear_depth = linear_view_depth(depth, uniforms.near_plane, uniforms.far_plane);
-    float const shade = 1.0 - saturate(linear_depth / uniforms.visualization_range);
+    float const shade = 1.0 - saturate(linear_depth / (2.0 * (float)uniforms.grid_ext));
     return float4(shade, shade, shade, 1.0);
+}
+
+float4 visualize_brick_coordinates(uint const entry_brick_record)
+{
+    if (entry_brick_record == 0u)
+    {
+        return BACKGROUND_COLOR;
+    }
+
+    uint const   packed = entry_brick_record - 1u;
+    uint3 const  brick = uint3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u);
+    float const  brick_grid_ext = (float)(uniforms.grid_ext / VX_BRICK_EXT);
+    float3 const normalized_brick = (float3(brick) + 0.5) / brick_grid_ext;
+    return float4(0.15 + 0.85 * normalized_brick, 1.0);
 }
 
 bool spatial_hash_lookup_visibility(float2 const uv, float const surface_depth, float3 const normal,
@@ -148,6 +162,5 @@ float4 main(ps_input const input) : SV_Target0
         return visualize_depth(surface_depth);
     }
 
-    float const entry_depth = brick_depth_tex.SampleLevel(brick_depth_sampler, pixel_uv, 0.0).r;
-    return visualize_depth(entry_depth);
+    return visualize_brick_coordinates(entry_bricks.Load(int3(pixel, 0)).r);
 }
