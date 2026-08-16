@@ -6,7 +6,6 @@
 Texture2D<float> depth_tex : register(t0, space0);
 Texture2D<uint>  normal_tex : register(t1, space0);
 Texture3D<uint>  voxel_tex : register(t2, space0);
-SamplerState     depth_sampler : register(s0, space0);
 
 RWStructuredBuffer<uint> hash_checksums : register(u0, space1);
 RWStructuredBuffer<uint> hash_payloads : register(u1, space1);
@@ -133,13 +132,14 @@ uint spatial_hash_find_or_insert(spatial_hash_key const key)
     }
 
     float2 const uv = (float2(pixel) + 0.5) / float2(width, height);
-    float const  depth = depth_tex.SampleLevel(depth_sampler, uv, 0.0).r;
+    int3 const   texel = int3(pixel, 0);
+    float const  depth = depth_tex.Load(texel).r;
     if (depth >= 1.0)
     {
         return;
     }
 
-    uint const   packed_normal = normal_tex.Load(int3(pixel, 0)).r;
+    uint const   packed_normal = normal_tex.Load(texel).r;
     float3 const normal = unpack_normal(packed_normal);
     float3 const face_pos =
         reconstruct_position(uniforms.inverse_view_projection, uv, depth, normal);

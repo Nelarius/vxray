@@ -640,7 +640,6 @@ typedef struct vxray
     SDL_GPUTexture*          rtao_visibility_texture;
     uint32_t                 render_width;
     uint32_t                 render_height;
-    SDL_GPUSampler*          display_sampler;
     SDL_GPUBuffer*           visible_faces_buffer;
     SDL_GPUBuffer*           indirect_draw_buffer;
     SDL_GPUTransferBuffer*   indirect_reset_transfer_buffer;
@@ -749,7 +748,8 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
                                     .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
                                     .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                             SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
                                     .width = width,
                                     .height = height,
                                     .layer_count_or_depth = 1,
@@ -771,7 +771,7 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
                                     .format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
                                     .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
                                     .width = width,
                                     .height = height,
                                     .layer_count_or_depth = 1,
@@ -898,7 +898,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
     if (!SDL_GPUTextureSupportsFormat(
             vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
-            SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER))
+            SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ))
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_D32_FLOAT not supported on this device");
         return SDL_APP_FAILURE;
@@ -920,7 +921,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     }
     if (!SDL_GPUTextureSupportsFormat(
             vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
-            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER))
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_R16_FLOAT not supported on this device");
         return SDL_APP_FAILURE;
@@ -1086,8 +1087,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                             .code = RTAO_CS_BYTES,
                                             .entrypoint = GPU_SHADER_ENTRYPOINT,
                                             .format = GPU_SHADER_FORMAT,
-                                            .num_samplers = 1,
-                                            .num_readonly_storage_textures = 2,
+                                            .num_readonly_storage_textures = 3,
                                             .num_readwrite_storage_buffers = 3,
                                             .num_uniform_buffers = 1,
                                             .threadcount_x = 8,
@@ -1113,8 +1113,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_samplers = 1,
-                                                 .num_storage_textures = 1,
+                                                 .num_storage_textures = 2,
                                                  .num_storage_buffers = 2,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -1173,8 +1172,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_samplers = 2,
-                                                 .num_storage_textures = 3,
+                                                 .num_storage_textures = 5,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
@@ -1218,20 +1216,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                          SDL_GetError());
             return SDL_APP_FAILURE;
         }
-    }
-
-    vxray_instance.display_sampler = SDL_CreateGPUSampler(
-        vxray_instance.gpu_device,
-        &(SDL_GPUSamplerCreateInfo){.min_filter = SDL_GPU_FILTER_NEAREST,
-                                    .mag_filter = SDL_GPU_FILTER_NEAREST,
-                                    .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
-                                    .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-                                    .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-                                    .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE});
-    if (!vxray_instance.display_sampler)
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display sampler: %s", SDL_GetError());
-        return SDL_APP_FAILURE;
     }
 
     {
@@ -1845,10 +1829,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         cmd_buffer, 0, 0, rtao_writable_buffers, SDL_arraysize(rtao_writable_buffers));
     assert(rtao_pass);
     SDL_BindGPUComputePipeline(rtao_pass, vxray_instance.rtao_pipeline);
-    SDL_GPUTextureSamplerBinding const rtao_depth_binding = {
-        .texture = vxray_instance.gbuffer_depth_texture, .sampler = vxray_instance.display_sampler};
-    SDL_BindGPUComputeSamplers(rtao_pass, 0, &rtao_depth_binding, 1);
     SDL_GPUTexture* const rtao_storage_textures[] = {
+        vxray_instance.gbuffer_depth_texture,
         vxray_instance.gbuffer_normal_texture,
         vxray_instance.voxel_texture,
     };
@@ -1871,11 +1853,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         SDL_BeginGPURenderPass(cmd_buffer, &rtao_target_info, 1, 0);
     assert(rtao_visibility_pass);
     SDL_BindGPUGraphicsPipeline(rtao_visibility_pass, vxray_instance.rtao_visibility_pipeline);
-    SDL_GPUTextureSamplerBinding const rtao_visibility_depth_binding = {
-        .texture = vxray_instance.gbuffer_depth_texture, .sampler = vxray_instance.display_sampler};
-    SDL_BindGPUFragmentSamplers(rtao_visibility_pass, 0, &rtao_visibility_depth_binding, 1);
     SDL_GPUTexture* const rtao_visibility_storage_textures[] = {
-        vxray_instance.gbuffer_normal_texture};
+        vxray_instance.gbuffer_depth_texture, vxray_instance.gbuffer_normal_texture};
     SDL_BindGPUFragmentStorageTextures(rtao_visibility_pass, 0, rtao_visibility_storage_textures,
                                        SDL_arraysize(rtao_visibility_storage_textures));
     SDL_GPUBuffer* const rtao_visibility_storage_buffers[] = {
@@ -1899,16 +1878,9 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(render_pass);
 
     SDL_BindGPUGraphicsPipeline(render_pass, vxray_instance.display_pipeline);
-    SDL_GPUTextureSamplerBinding const display_bindings[] = {
-        {.texture = vxray_instance.gbuffer_depth_texture,
-         .sampler = vxray_instance.display_sampler},
-        {.texture = vxray_instance.rtao_visibility_texture,
-         .sampler = vxray_instance.display_sampler},
-    };
-    SDL_BindGPUFragmentSamplers(render_pass, 0, display_bindings, SDL_arraysize(display_bindings));
     SDL_GPUTexture* const display_storage_textures[] = {
-        vxray_instance.entry_brick_texture,
-        vxray_instance.gbuffer_albedo_texture,
+        vxray_instance.gbuffer_depth_texture,  vxray_instance.rtao_visibility_texture,
+        vxray_instance.entry_brick_texture,    vxray_instance.gbuffer_albedo_texture,
         vxray_instance.gbuffer_normal_texture,
     };
     SDL_BindGPUFragmentStorageTextures(render_pass, 0, display_storage_textures,
@@ -2043,12 +2015,6 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_albedo_texture);
         vxray_instance.gbuffer_albedo_texture = 0;
-    }
-
-    if (vxray_instance.display_sampler)
-    {
-        SDL_ReleaseGPUSampler(vxray_instance.gpu_device, vxray_instance.display_sampler);
-        vxray_instance.display_sampler = 0;
     }
 
     if (vxray_instance.gbuffer_pipeline)
