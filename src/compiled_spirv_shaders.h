@@ -25,3 +25,6 @@ extern size_t const GBUFFER_PS_SIZE;
 
 extern uint8_t const RTAO_CS_BYTES[];
 extern size_t const RTAO_CS_SIZE;
+
+extern uint8_t const RTAO_PS_BYTES[];
+extern size_t const RTAO_PS_SIZE;

@@ -1,6 +1,5 @@
 #include "constants.h"
 #include "display.h"
-#include "rtao.h"
 
 #include "spatial_hash.hlsli"
 
@@ -9,14 +8,14 @@ struct ps_input
     float4 position : SV_Position;
 };
 
-Texture2D<float>       depth_tex : register(t0, space2);
-Texture2D<uint>        entry_bricks : register(t1, space2);
-Texture2D<uint>        albedo_tex : register(t2, space2);
-Texture2D<uint>        normal_tex : register(t3, space2);
-StructuredBuffer<uint> hash_checksums : register(t4, space2);
-StructuredBuffer<uint> hash_payloads : register(t5, space2);
+Texture2D<float> depth_tex : register(t0, space2);
+Texture2D<float> visibility_tex : register(t1, space2);
+Texture2D<uint>  entry_bricks : register(t2, space2);
+Texture2D<uint>  albedo_tex : register(t3, space2);
+Texture2D<uint>  normal_tex : register(t4, space2);
 
 SamplerState depth_sampler : register(s0, space2);
+SamplerState visibility_sampler : register(s1, space2);
 
 ConstantBuffer<display_uniforms> uniforms : register(b0, space3);
 
@@ -58,42 +57,6 @@ float4 visualize_brick_coordinates(uint const entry_brick_record)
     return float4(0.15 + 0.85 * normalized_brick, 1.0);
 }
 
-bool spatial_hash_lookup_visibility(float2 const uv, float const surface_depth, float3 const normal,
-                                    out float visibility)
-{
-    visibility = 0.0;
-    float3 const face_position =
-        reconstruct_position(uniforms.inverse_view_projection, uv, surface_depth, normal);
-    float const view_depth =
-        linear_view_depth(surface_depth, uniforms.near_plane, uniforms.far_plane);
-    float const cell_size = compute_cell_size(view_depth, uniforms.vertical_fov,
-                                              uniforms.render_height, uniforms.sp, uniforms.smin);
-    spatial_hash_key const key = make_spatial_hash_key(face_position, normal, cell_size);
-
-    uint index = key.hash & VX_AO_HASH_MASK;
-    for (uint probe = 0u; probe < VX_AO_HASH_PROBE_COUNT; ++probe)
-    {
-        uint const checksum = hash_checksums[index];
-        if (checksum == key.checksum)
-        {
-            uint const payload = hash_payloads[index];
-            uint const sample_count = payload & 0xffffu;
-            if (sample_count == 0u)
-            {
-                return false;
-            }
-            visibility = 1.0 - (float)(payload >> 16u) / (float)sample_count;
-            return true;
-        }
-        if (checksum == 0u)
-        {
-            return false;
-        }
-        index = (index + 1u) & VX_AO_HASH_MASK;
-    }
-    return false;
-}
-
 float3 cell_size_color(float const cell_size, float const smin)
 {
     // Adjacent powers of two receive distinct colors, including sizes below smin.
@@ -125,12 +88,11 @@ float4 main(ps_input const input) : SV_Target0
             return BACKGROUND_COLOR;
         }
 
-        int3 const   texel = int3(pixel, 0);
-        uint const   packed_normal = normal_tex.Load(texel).r;
-        float3 const normal = unpack_normal(packed_normal);
+        int3 const texel = int3(pixel, 0);
 
         if (uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL)
         {
+            uint const packed_normal = normal_tex.Load(texel).r;
             return float4(unpack_normal(packed_normal) * 0.5 + 0.5, 1.0);
         }
         if (uniforms.texture_type == VX_DISPLAY_TEXTURE_CELL_SIZE)
@@ -143,8 +105,8 @@ float4 main(ps_input const input) : SV_Target0
             return float4(cell_size_color(cell_size, uniforms.smin), 1.0);
         }
 
-        float visibility;
-        if (!spatial_hash_lookup_visibility(pixel_uv, surface_depth, normal, visibility))
+        float const visibility = visibility_tex.SampleLevel(visibility_sampler, pixel_uv, 0.0).r;
+        if (visibility < 0.0)
         {
             return CACHE_FAILURE_COLOR;
         }

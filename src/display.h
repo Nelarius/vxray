@@ -11,13 +11,12 @@
 
 typedef struct display_uniforms
 {
-    float4x4 inverse_view_projection;
-    uint     texture_type;
-    float    near_plane;
-    float    far_plane;
-    uint     grid_ext;
-    float    sp;
-    float    smin;
-    float    vertical_fov;
-    uint     render_height;
+    uint  texture_type;
+    float near_plane;
+    float far_plane;
+    uint  grid_ext;
+    float sp;
+    float smin;
+    float vertical_fov;
+    uint  render_height;
 } display_uniforms;
