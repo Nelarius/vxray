@@ -770,7 +770,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
 
-    vxray_instance.ao_sp = 5.f;
+    vxray_instance.ao_sp = 10.f;
     vxray_instance.ao_smin = 0.07f;
 
     if (argc < 2 || argc > 3)

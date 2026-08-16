@@ -2,7 +2,7 @@
 
 #include "hlsl_shim.h"
 
-#define VX_AO_HASH_CAPACITY (1u << 24u)
+#define VX_AO_HASH_CAPACITY (1u << 23u)
 #define VX_AO_HASH_MASK (VX_AO_HASH_CAPACITY - 1u)
 #define VX_AO_HASH_PROBE_COUNT 16u
 #define VX_AO_MAX_CELL_AGE 20u
