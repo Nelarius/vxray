@@ -86,8 +86,8 @@ set(VXRAY_SOURCES
         brick_quad.ps.hlsl
         brick_quad.vs.hlsl
         constants.h
-        cvox.cc
-        cvox.h
+        integrations/cvox.cc
+        integrations/cvox.h
         display.h
         display.ps.hlsl
         fullscreen.vs.hlsl
