@@ -58,21 +58,22 @@ float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, flo
     return max(max(lo.x, lo.y), max(lo.z, 0.0));
 }
 
-uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
-                 int16_t3 const brick_cell)
+uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
+                 float3 const delta_dist, int16_t3 const brick_cell)
 {
     int16_t3 const brick_min = brick_cell * (int16_t)VX_BRICK_EXT;
     float const    t = aabb_entry_distance(origin, inv_dir, float3(brick_min),
                                            float3(brick_min + (int16_t3)VX_BRICK_EXT));
-    float3 const   local_entry = origin + t * dir - float3(brick_min);
-    int16_t3 local_cell = clamp(int16_t3(local_entry), (int16_t3)0, (int16_t3)(VX_BRICK_EXT - 1));
-    float3 const   s = sign(dir);
-    int16_t3 const step_dir = int16_t3(s);
-    float3 const   next = float3(local_cell) + max(float3(step_dir), (float3)0.0);
-    float3         tnext = (next - local_entry) * inv_dir;
-    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x;
-    tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
-    tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
+    float3 const   local_pos = origin + t * dir - float3(brick_min);
+    int16_t3     local_cell = clamp(int16_t3(local_pos), (int16_t3)0, (int16_t3)(VX_BRICK_EXT - 1));
+    float3 const ray_sign = sign(dir);
+    float3 const next_pos = float3(local_cell) + max(ray_sign, (float3)0.0);
+    float3       side_dist = (next_pos - local_pos) * inv_dir;
+    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
+    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
+    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
+
+    int16_t3 const step_sign = int16_t3(ray_sign);
     for (;;)
     {
         if (any((uint16_t3)local_cell >= (uint16_t)VX_BRICK_EXT))
@@ -87,9 +88,9 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
         }
 
         // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
-        tnext += axis_mask * tdelta;
-        local_cell += int16_t3(axis_mask) * step_dir;
+        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
+        side_dist += axis_mask * delta_dist;
+        local_cell += int16_t3(axis_mask) * step_sign;
     }
 }
 
@@ -98,17 +99,17 @@ uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
     // Good insight into DDA: https://news.ycombinator.com/item?id=43599990
 
     float3 const inv_dir = 1.0 / dir;
-    float3 const tdelta = abs(inv_dir);
+    float3 const delta_dist = abs(inv_dir);
 
-    float3 const   s = sign(dir);
-    int16_t3 const step_dir = int16_t3(s);
-    float3 const   next = (float3(brick_cell) + max(float3(step_dir), (float3)0.0)) * VX_BRICK_EXT;
-    float3         tnext = (next - origin) * inv_dir / (float)VX_BRICK_EXT;
-    tnext.x = s.x == 0.0 ? 3e+38 : tnext.x;
-    tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
-    tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
+    float3 const ray_sign = sign(dir);
+    float3 const next_pos = (float3(brick_cell) + max(ray_sign, (float3)0.0)) * VX_BRICK_EXT;
+    float3       side_dist = (next_pos - origin) * inv_dir / (float)VX_BRICK_EXT;
+    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
+    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
+    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
 
-    int16_t const brick_grid_ext = (int16_t)uniforms.grid_ext / (int16_t)VX_BRICK_EXT;
+    int16_t3 const step_sign = int16_t3(ray_sign);
+    int16_t const  brick_grid_ext = (int16_t)uniforms.grid_ext / (int16_t)VX_BRICK_EXT;
     for (;;)
     {
         if (any((uint16_t3)brick_cell >= (uint16_t)brick_grid_ext))
@@ -118,7 +119,7 @@ uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
 
         if (brick_at(brick_cell) > 0u)
         {
-            uint const packed_cell = trace_brick(origin, dir, inv_dir, tdelta, brick_cell);
+            uint const packed_cell = trace_brick(origin, dir, inv_dir, delta_dist, brick_cell);
             if (packed_cell != VX_NO_CELL)
             {
                 return packed_cell;
@@ -126,9 +127,9 @@ uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
         }
 
         // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        float3 const axis_mask = step(tnext, min(tnext.yzx, tnext.zxy));
-        tnext += axis_mask * tdelta;
-        brick_cell += int16_t3(axis_mask) * step_dir;
+        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
+        side_dist += axis_mask * delta_dist;
+        brick_cell += int16_t3(axis_mask) * step_sign;
     }
 }
 
