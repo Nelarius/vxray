@@ -94,3 +94,11 @@ Use `= {0}` for zero-initialization of structs and arrays.
 - Use `0` instead of `NULL` for null pointers
 - Explicit casts when converting between types: `(size_t)shader_count`
 - Prefix increment/decrement: `++i` not `i++`
+
+**Shaders**
+
+Shaders are performance critical and standard practice from regular programs does not apply.
+
+- Inputs should not be validated in a shader. The correct place to do that is in the host program, when constructing the uniform or buffer.
+- The shader should be as small as possible. Keep the live state as small as possible to avoid increasing register pressure.
+- Keep variable names terse.
