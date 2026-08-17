@@ -124,7 +124,9 @@ uint spatial_hash_find_or_insert(spatial_hash_key const key)
 [numthreads(8, 8, 1)] void main(uint3 const dispatch_thread_id : SV_DispatchThreadID) {
     uint width, height;
     depth_tex.GetDimensions(width, height);
-    uint2 const pixel = dispatch_thread_id.xy;
+    uint const  checkerboard_offset = (dispatch_thread_id.y + uniforms.frame_index) & 1u;
+    uint2 const pixel =
+        uint2(dispatch_thread_id.x * 2u + checkerboard_offset, dispatch_thread_id.y);
     if (any(pixel >= uint2(width, height)))
     {
         return;
