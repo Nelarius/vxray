@@ -5,14 +5,13 @@
 
 struct ps_input
 {
+    float4 position : SV_Position;
     float2 uv : TEXCOORD0;
 };
 
 ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
-Texture2D<float> entry_depth : register(t0, space2);
-SamplerState     entry_sampler : register(s0, space2);
-
+Texture2D<uint>        entry_bricks : register(t0, space2);
 Texture3D<uint>        voxels : register(t1, space2);
 Texture3D<uint>        bricks : register(t2, space2);
 StructuredBuffer<uint> palette_rgba : register(t3, space2);
@@ -30,6 +29,11 @@ uint pack_voxel_cell(int16_t3 const cell)
 int16_t3 unpack_voxel_cell(uint const packed)
 {
     return int16_t3(packed & 1023u, (packed >> 10u) & 1023u, (packed >> 20u) & 1023u);
+}
+
+int16_t3 unpack_brick_cell(uint const packed)
+{
+    return int16_t3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u);
 }
 
 bool camera_is_inside_occupied_brick()
@@ -52,32 +56,6 @@ float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, flo
     float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
     float3 const lo = min(t0, t1);
     return max(max(lo.x, lo.y), max(lo.z, 0.0));
-}
-
-float3 reconstruct_brick_pos(float3 const reconstructed_pos, float3 const dir)
-{
-    float const  brick_ext = (float)VX_BRICK_EXT;
-    float3 const brick_pos = reconstructed_pos / brick_ext;
-    float3 const rounded_brick_pos = round(brick_pos);
-    float3 const plane_distance = abs(brick_pos - rounded_brick_pos);
-
-    float3 face_axis;
-    if (plane_distance.x <= plane_distance.y && plane_distance.x <= plane_distance.z)
-    {
-        face_axis = float3(1.0, 0.0, 0.0);
-    }
-    else if (plane_distance.y <= plane_distance.z)
-    {
-        face_axis = float3(0.0, 1.0, 0.0);
-    }
-    else
-    {
-        face_axis = float3(0.0, 0.0, 1.0);
-    }
-
-    float3 const face_pos = lerp(reconstructed_pos, rounded_brick_pos * brick_ext, face_axis);
-    float3 const inward_normal = face_axis * sign(dir);
-    return offset_ray(face_pos, inward_normal);
 }
 
 uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, float3 const tdelta,
@@ -115,8 +93,7 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir, fl
     }
 }
 
-// The `entry` (i.e. entrypoint to DDA) is expected to be a point contained in the grid.
-uint multilevel_dda(float3 const entry, float3 const dir)
+uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
 {
     // Good insight into DDA: https://news.ycombinator.com/item?id=43599990
 
@@ -125,9 +102,8 @@ uint multilevel_dda(float3 const entry, float3 const dir)
 
     float3 const   s = sign(dir);
     int16_t3 const step_dir = int16_t3(s);
-    int16_t3       brick_cell = int16_t3(entry / (float)VX_BRICK_EXT);
     float3 const   next = (float3(brick_cell) + max(float3(step_dir), (float3)0.0)) * VX_BRICK_EXT;
-    float3         tnext = (next - entry) * inv_dir / (float)VX_BRICK_EXT;
+    float3         tnext = (next - origin) * inv_dir / (float)VX_BRICK_EXT;
     tnext.x = s.x == 0.0 ? 3e+38 : tnext.x;
     tnext.y = s.y == 0.0 ? 3e+38 : tnext.y;
     tnext.z = s.z == 0.0 ? 3e+38 : tnext.z;
@@ -142,7 +118,7 @@ uint multilevel_dda(float3 const entry, float3 const dir)
 
         if (brick_at(brick_cell) > 0u)
         {
-            uint const packed_cell = trace_brick(entry, dir, inv_dir, tdelta, brick_cell);
+            uint const packed_cell = trace_brick(origin, dir, inv_dir, tdelta, brick_cell);
             if (packed_cell != VX_NO_CELL)
             {
                 return packed_cell;
@@ -199,23 +175,26 @@ ps_output miss()
 
 ps_output main(ps_input const input)
 {
-    float const entry_device_depth = entry_depth.SampleLevel(entry_sampler, input.uv, 0.0).r;
-    bool const  camera_inside = camera_is_inside_occupied_brick();
-    if (entry_device_depth >= 1.0 && !camera_inside)
+    bool const camera_inside = camera_is_inside_occupied_brick();
+    uint       entry_brick_record = 0u;
+    if (!camera_inside)
     {
-        return miss();
+        entry_brick_record = entry_bricks.Load(int3(input.position.xy, 0)).r;
+        if (entry_brick_record == 0u)
+        {
+            return miss();
+        }
     }
 
     float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 const dir =
         normalize(unproject(uniforms.inverse_view_projection, ndc, 1.0) - uniforms.camera_pos.xyz);
     float3 const trace_origin =
-        camera_inside
-            ? offset_ray(uniforms.camera_pos.xyz, dir)
-            : reconstruct_brick_pos(
-                  unproject(uniforms.inverse_view_projection, ndc, entry_device_depth), dir);
+        camera_inside ? offset_ray(uniforms.camera_pos.xyz, dir) : uniforms.camera_pos.xyz;
+    int16_t3 const first_brick = camera_inside ? int16_t3(trace_origin / (float)VX_BRICK_EXT)
+                                               : unpack_brick_cell(entry_brick_record - 1u);
 
-    uint const packed_cell = multilevel_dda(trace_origin, dir);
+    uint const packed_cell = multilevel_dda(trace_origin, dir, first_brick);
     if (packed_cell == VX_NO_CELL)
     {
         return miss();

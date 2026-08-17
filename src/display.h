@@ -5,7 +5,7 @@
 #define VX_DISPLAY_TEXTURE_ALBEDO 0
 #define VX_DISPLAY_TEXTURE_NORMAL 1
 #define VX_DISPLAY_TEXTURE_SURFACE_DEPTH 2
-#define VX_DISPLAY_TEXTURE_BRICK_AABB_DEPTH 3
+#define VX_DISPLAY_TEXTURE_BRICK_COORDINATES 3
 #define VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY 4
 #define VX_DISPLAY_TEXTURE_CELL_SIZE 5
 
@@ -15,7 +15,7 @@ typedef struct display_uniforms
     uint     texture_type;
     float    near_plane;
     float    far_plane;
-    float    visualization_range;
+    uint     grid_ext;
     float    sp;
     float    smin;
     float    vertical_fov;
