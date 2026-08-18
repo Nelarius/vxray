@@ -45,6 +45,12 @@ static_assert(sizeof(rtao_uniforms) == 128, "RTAO uniform layout must match HLSL
 static_assert(sizeof(rtao_filter_uniforms) == 80, "RTAO filter uniform layout must match HLSL");
 static_assert(1024 / VX_BRICK_EXT <= 256, "brick-grid coordinates must fit in packed face records");
 
+#ifdef NDEBUG
+#define GPU_DEVICE_DEBUG_MODE false
+#else
+#define GPU_DEVICE_DEBUG_MODE true
+#endif
+
 #if defined(SDL_PLATFORM_APPLE)
 
 #include "compiled_metal_shaders.h"
@@ -900,7 +906,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
     {
         SDL_GPUDevice* const gpu_device =
-            SDL_CreateGPUDevice(GPU_SHADER_FORMAT, false, GPU_DRIVER_NAME);
+            SDL_CreateGPUDevice(GPU_SHADER_FORMAT, GPU_DEVICE_DEBUG_MODE, GPU_DRIVER_NAME);
 
         if (!gpu_device)
         {
