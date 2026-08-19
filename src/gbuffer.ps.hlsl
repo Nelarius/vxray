@@ -13,12 +13,11 @@ ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
 Texture2D<uint>        entry_bricks : register(t0, space2);
 Texture3D<uint>        voxels : register(t1, space2);
-Texture3D<uint>        bricks : register(t2, space2);
-StructuredBuffer<uint> palette_rgba : register(t3, space2);
+Texture3D<uint2>       voxel_masks : register(t2, space2);
+Texture3D<uint2>       brick_masks : register(t3, space2);
+StructuredBuffer<uint> palette_rgba : register(t4, space2);
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
-
-uint brick_at(int16_t3 const p) { return bricks.Load(int4(p, 0)).r; }
 
 uint pack_voxel_cell(int16_t3 const cell)
 {
@@ -36,101 +35,102 @@ int16_t3 unpack_brick_cell(uint const packed)
     return int16_t3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u);
 }
 
-bool camera_is_inside_occupied_brick()
+// NOTE: ext is expected to be a power of two
+int mask_linear_idx(int16_t3 const coord, int const ext)
 {
-    float const  ext = (float)uniforms.grid_ext;
-    float3 const camera_position = uniforms.camera_pos.xyz;
-    if (any(camera_position < (float3)0.0) || any(camera_position >= (float3)ext))
-    {
-        return false;
-    }
-
-    int16_t3 const camera_brick = int16_t3(camera_position / (float)VX_BRICK_EXT);
-    return brick_at(camera_brick) > 0u;
+    int x = coord.x & (ext - 1);
+    int y = coord.y & (ext - 1);
+    int z = coord.z & (ext - 1);
+    return x + y * ext + z * ext * ext;
 }
 
-float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
-                          float3 const p1)
+bool mask_bit_test(uint2 const mask, int index)
 {
-    float3 const t0 = (p0 - ray_origin) * inv_ray_dir;
-    float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
-    float3 const lo = min(t0, t1);
-    return max(max(lo.x, lo.y), max(lo.z, 0.0));
+    uint const word = mask[index >> 5u];
+    uint const bit = 1u << (index & 31u);
+    return (word & bit) != 0;
 }
 
-uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
-                 float3 const delta_dist, int16_t3 const brick_cell)
+uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir,
+                      int16_t3 const entry_brick_cell)
 {
-    int16_t3 const brick_min = brick_cell * (int16_t)VX_BRICK_EXT;
-    float const    t = aabb_entry_distance(origin, inv_dir, float3(brick_min),
-                                           float3(brick_min + (int16_t3)VX_BRICK_EXT));
-    float3 const   local_pos = origin + t * dir - float3(brick_min);
-    int16_t3     local_cell = clamp(int16_t3(local_pos), (int16_t3)0, (int16_t3)(VX_BRICK_EXT - 1));
-    float3 const ray_sign = sign(dir);
-    float3 const next_pos = float3(local_cell) + max(ray_sign, (float3)0.0);
-    float3       side_dist = (next_pos - local_pos) * inv_dir;
-    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
-    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
-    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
+    float3 const inv_dir = 1.0 / ray_dir;
+    float3 const t_start = (step(0.0, ray_dir) - ray_origin) * inv_dir;
 
-    int16_t3 const step_sign = int16_t3(ray_sign);
+    int16_t3 ipos = entry_brick_cell * VX_BRICK_EXT;
     for (;;)
     {
-        if (any((uint16_t3)local_cell >= (uint16_t)VX_BRICK_EXT))
+        if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
         {
             return VX_NO_CELL;
         }
 
-        int16_t3 const cell = brick_min + local_cell;
-        if (voxel_at(cell) > 0u)
+        // Determine occupancy level to use
+
+        int   mask_idx = mask_linear_idx(ipos >> 3, 4);
+        uint2 mask = brick_masks.Load(int4(ipos >> 5, 0)).rg;
+        int   scale = VX_BRICK_EXT;
+
+        if (mask_bit_test(mask, mask_idx))
         {
-            return pack_voxel_cell(cell);
-        }
+            mask_idx = mask_linear_idx(ipos, 4);
+            mask = voxel_masks.Load(int4(ipos >> 2, 0)).rg;
+            scale = 1;
 
-        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
-        side_dist += axis_mask * delta_dist;
-        local_cell += int16_t3(axis_mask) * step_sign;
-    }
-}
-
-uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
-{
-    // Good insight into DDA: https://news.ycombinator.com/item?id=43599990
-
-    float3 const inv_dir = 1.0 / dir;
-    float3 const delta_dist = abs(inv_dir);
-
-    float3 const ray_sign = sign(dir);
-    float3 const next_pos = (float3(brick_cell) + max(ray_sign, (float3)0.0)) * VX_BRICK_EXT;
-    float3       side_dist = (next_pos - origin) * inv_dir / (float)VX_BRICK_EXT;
-    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
-    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
-    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
-
-    int16_t3 const step_sign = int16_t3(ray_sign);
-    int16_t const  brick_grid_ext = (int16_t)uniforms.grid_ext / (int16_t)VX_BRICK_EXT;
-    for (;;)
-    {
-        if (any((uint16_t3)brick_cell >= (uint16_t)brick_grid_ext))
-        {
-            return VX_NO_CELL;
-        }
-
-        if (brick_at(brick_cell) > 0u)
-        {
-            uint const packed_cell = trace_brick(origin, dir, inv_dir, delta_dist, brick_cell);
-            if (packed_cell != VX_NO_CELL)
+            if (mask_bit_test(mask, mask_idx))
             {
-                return packed_cell;
+                return pack_voxel_cell(ipos);
             }
         }
 
-        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
-        side_dist += axis_mask * delta_dist;
-        brick_cell += int16_t3(axis_mask) * step_sign;
+        // Determine largest empty region containing `ipos`
+
+        int lod;
+
+        if ((mask.x | mask.y) == 0)
+        {
+            // Entire 4x4x4 region is empty
+            lod = 4;
+        }
+        else
+        {
+            uint const mask_part = mask_idx < 32 ? mask.x : mask.y;
+            // Is the containing 2x2x2 region empty?
+            // 0x0A preserves the high bits of the 2x2x2 block's local x and y coordinates.
+            if (((mask_part >> (mask_idx & 0x0A)) & 0x00330033u) == 0)
+            {
+                lod = 2;
+            }
+            else
+            {
+                lod = 1;
+            }
+        }
+
+        lod *= scale;
+
+        // Move ipos to the far edge of the empty region in the direction of travel
+
+        int const cell_mask = lod - 1;
+        // & ~cell_mask: truncate to beginning of empty region
+        // | cell_mask: fill in to end of empty region
+        ipos.x = (int16_t)(ray_dir.x < 0.0 ? (ipos.x & ~cell_mask) : (ipos.x | cell_mask));
+        ipos.y = (int16_t)(ray_dir.y < 0.0 ? (ipos.y & ~cell_mask) : (ipos.y | cell_mask));
+        ipos.z = (int16_t)(ray_dir.z < 0.0 ? (ipos.z & ~cell_mask) : (ipos.z | cell_mask));
+
+        // Intersect the ray with the forward-facing planes of the new cell
+
+        float3 side_dist = t_start + float3(ipos) * inv_dir;
+        side_dist.x = ray_dir.x == 0.0 ? 3e+38 : side_dist.x;
+        side_dist.y = ray_dir.y == 0.0 ? 3e+38 : side_dist.y;
+        side_dist.z = ray_dir.z == 0.0 ? 3e+38 : side_dist.z;
+        float t = min(side_dist.x, min(side_dist.y, side_dist.z));
+        t = asfloat(asuint(t) + 5u); // bias forward slightly. TODO: offset using face normal
+        float3 const next_pos = ray_origin + t * ray_dir;
+        ipos = int16_t3(floor(next_pos));
     }
+
+    return VX_NO_CELL;
 }
 
 struct voxel_intersection
@@ -165,6 +165,25 @@ struct ps_output
     float depth : SV_Depth;
 };
 
+bool brick_is_occupied(int16_t3 const p)
+{
+    uint2 const mask = brick_masks.Load(int4(p >> 2, 0)).rg;
+    return mask_bit_test(mask, mask_linear_idx(p, 4));
+}
+
+bool camera_is_inside_occupied_brick()
+{
+    float const  ext = (float)uniforms.grid_ext;
+    float3 const camera_position = uniforms.camera_pos.xyz;
+    if (any(camera_position < (float3)0.0) || any(camera_position >= (float3)ext))
+    {
+        return false;
+    }
+
+    int16_t3 const camera_brick = int16_t3(camera_position / (float)VX_BRICK_EXT);
+    return brick_is_occupied(camera_brick);
+}
+
 ps_output miss()
 {
     ps_output output;
@@ -195,7 +214,7 @@ ps_output main(ps_input const input)
     int16_t3 const first_brick = camera_inside ? int16_t3(trace_origin / (float)VX_BRICK_EXT)
                                                : unpack_brick_cell(entry_brick_record - 1u);
 
-    uint const packed_cell = multilevel_dda(trace_origin, dir, first_brick);
+    uint const packed_cell = sparse_ray_march(trace_origin, dir, first_brick);
     if (packed_cell == VX_NO_CELL)
     {
         return miss();
