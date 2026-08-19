@@ -61,13 +61,18 @@ float3 orient_sample_direction(float3 const v, float3 const n)
 
 bool dda(float3 const pos, float3 const dir, float const t_max)
 {
-    float3 const    grid_pos = floor(pos);
-    float3 const    delta_dist = 1.0 / max(abs(dir), (float3)1e-20);
-    float3 const    ray_sign = sign(dir);
+    float3 const inv_dir = 1.0 / dir;
+    float3 const delta_dist = abs(inv_dir);
+
+    float3 const grid_pos = floor(pos);
+    float3 const ray_sign = sign(dir);
+    float3 const next_pos = grid_pos + max(ray_sign, (float3)0.0);
+    float3       side_dist = (next_pos - pos) * ray_sign * delta_dist;
+    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
+    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
+    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
+
     min16int3 const step_sign = min16int3(ray_sign);
-    float3 const    next_pos = grid_pos + max(ray_sign, (float3)0.0);
-    float3 const    zero_dir_guard = (1.0 - abs(ray_sign)) * 3e+38;
-    float3          side_dist = (next_pos - pos) * ray_sign * delta_dist + zero_dir_guard;
     min16int3       voxel = min16int3(grid_pos);
     for (;;)
     {
