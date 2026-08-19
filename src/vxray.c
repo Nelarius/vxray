@@ -26,6 +26,7 @@
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_platform_defines.h>
+#include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
@@ -372,12 +373,83 @@ static void vx_scene_free(vx_scene* const scene)
     scene->voxel_grid = (vx_buffer(uint8_t)){0};
 }
 
+// Resource creation wrappers that attach a debug name, displayed in graphics debuggers, via the
+// properties API.
+
+static SDL_GPUTexture* vx_create_gpu_texture(SDL_GPUDevice* const           device,
+                                             SDL_GPUTextureCreateInfo const info,
+                                             char const* const              name)
+{
+    SDL_PropertiesID const props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_TEXTURE_CREATE_NAME_STRING, name);
+    SDL_GPUTextureCreateInfo named_info = info;
+    named_info.props = props;
+    SDL_GPUTexture* const texture = SDL_CreateGPUTexture(device, &named_info);
+    SDL_DestroyProperties(props);
+    return texture;
+}
+
+static SDL_GPUBuffer* vx_create_gpu_buffer(SDL_GPUDevice* const          device,
+                                           SDL_GPUBufferCreateInfo const info,
+                                           char const* const             name)
+{
+    SDL_PropertiesID const props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_BUFFER_CREATE_NAME_STRING, name);
+    SDL_GPUBufferCreateInfo named_info = info;
+    named_info.props = props;
+    SDL_GPUBuffer* const buffer = SDL_CreateGPUBuffer(device, &named_info);
+    SDL_DestroyProperties(props);
+    return buffer;
+}
+
+static SDL_GPUTransferBuffer*
+vx_create_gpu_transfer_buffer(SDL_GPUDevice* const                  device,
+                              SDL_GPUTransferBufferCreateInfo const info, char const* const name)
+{
+    SDL_PropertiesID const props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_TRANSFERBUFFER_CREATE_NAME_STRING, name);
+    SDL_GPUTransferBufferCreateInfo named_info = info;
+    named_info.props = props;
+    SDL_GPUTransferBuffer* const buffer = SDL_CreateGPUTransferBuffer(device, &named_info);
+    SDL_DestroyProperties(props);
+    return buffer;
+}
+
+static SDL_GPUComputePipeline*
+vx_create_gpu_compute_pipeline(SDL_GPUDevice* const                   device,
+                               SDL_GPUComputePipelineCreateInfo const info, char const* const name)
+{
+    SDL_PropertiesID const props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, name);
+    SDL_GPUComputePipelineCreateInfo named_info = info;
+    named_info.props = props;
+    SDL_GPUComputePipeline* const pipeline = SDL_CreateGPUComputePipeline(device, &named_info);
+    SDL_DestroyProperties(props);
+    return pipeline;
+}
+
+static SDL_GPUGraphicsPipeline*
+vx_create_gpu_graphics_pipeline(SDL_GPUDevice* const                    device,
+                                SDL_GPUGraphicsPipelineCreateInfo const info,
+                                char const* const                       name)
+{
+    SDL_PropertiesID const props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_GRAPHICSPIPELINE_CREATE_NAME_STRING, name);
+    SDL_GPUGraphicsPipelineCreateInfo named_info = info;
+    named_info.props = props;
+    SDL_GPUGraphicsPipeline* const pipeline = SDL_CreateGPUGraphicsPipeline(device, &named_info);
+    SDL_DestroyProperties(props);
+    return pipeline;
+}
+
 static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* const buffer,
                                  void const* const data, uint32_t const size)
 {
-    SDL_GPUTransferBuffer* const transfer = SDL_CreateGPUTransferBuffer(
-        device, &(SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                                                   .size = size});
+    SDL_GPUTransferBuffer* const transfer = vx_create_gpu_transfer_buffer(
+        device,
+        (SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                                          .size = size},
+        "buffer-upload");
     if (!transfer)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create GPU transfer buffer: %s",
@@ -426,9 +498,11 @@ static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* con
 static bool vx_gpu_texture_upload(SDL_GPUDevice* const device, SDL_GPUTexture* const texture,
                                   void* const data, uint32_t const size, uint32_t grid_ext)
 {
-    SDL_GPUTransferBuffer* const transfer = SDL_CreateGPUTransferBuffer(
-        device, &(SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                                                   .size = size});
+    SDL_GPUTransferBuffer* const transfer = vx_create_gpu_transfer_buffer(
+        device,
+        (SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                                          .size = size},
+        "texture-upload");
     if (!transfer)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create GPU transfer buffer: %s",
@@ -672,16 +746,17 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return true;
     }
 
-    SDL_GPUTexture* const entry_depth_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const entry_depth_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+                                   .width = width,
+                                   .height = height,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "entry-depth");
     if (!entry_depth_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create entry depth texture: %s",
@@ -689,17 +764,18 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const entry_brick_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const entry_brick_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                            SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                   .width = width,
+                                   .height = height,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "entry-brick");
     if (!entry_brick_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create entry brick texture: %s",
@@ -708,17 +784,18 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const gbuffer_albedo_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const gbuffer_albedo_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                            SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                   .width = width,
+                                   .height = height,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "gbuffer-albedo");
     if (!gbuffer_albedo_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create G-buffer albedo texture: %s",
@@ -728,18 +805,19 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const gbuffer_normal_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const gbuffer_normal_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                                             SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                            SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                            SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                   .width = width,
+                                   .height = height,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "gbuffer-normal");
     if (!gbuffer_normal_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create G-buffer normal texture: %s",
@@ -750,17 +828,18 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const gbuffer_depth_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const gbuffer_depth_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                            SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                   .width = width,
+                                   .height = height,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "gbuffer-depth");
     if (!gbuffer_depth_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create G-buffer depth texture: %s",
@@ -772,17 +851,18 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         return false;
     }
 
-    SDL_GPUTexture* const rtao_visibility_texture = SDL_CreateGPUTexture(
+    SDL_GPUTexture* const rtao_visibility_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
-        &(SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                    .format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
-                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                             SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                    .width = width,
-                                    .height = height,
-                                    .layer_count_or_depth = 1,
-                                    .num_levels = 1,
-                                    .sample_count = SDL_GPU_SAMPLECOUNT_1});
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                            SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                   .width = width,
+                                   .height = height,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "rtao-visibility");
     if (!rtao_visibility_texture)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create RTAO visibility texture: %s",
@@ -934,18 +1014,19 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
     // Brick-face generation pipeline
 
-    vxray_instance.brick_quad_compute_pipeline = SDL_CreateGPUComputePipeline(
+    vxray_instance.brick_quad_compute_pipeline = vx_create_gpu_compute_pipeline(
         vxray_instance.gpu_device,
-        &(SDL_GPUComputePipelineCreateInfo){.code_size = BRICK_QUAD_CS_SIZE,
-                                            .code = BRICK_QUAD_CS_BYTES,
-                                            .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                            .format = GPU_SHADER_FORMAT,
-                                            .num_readonly_storage_textures = 1,
-                                            .num_readwrite_storage_buffers = 2,
-                                            .num_uniform_buffers = 1,
-                                            .threadcount_x = 64,
-                                            .threadcount_y = 1,
-                                            .threadcount_z = 1});
+        (SDL_GPUComputePipelineCreateInfo){.code_size = BRICK_QUAD_CS_SIZE,
+                                           .code = BRICK_QUAD_CS_BYTES,
+                                           .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                           .format = GPU_SHADER_FORMAT,
+                                           .num_readonly_storage_textures = 1,
+                                           .num_readwrite_storage_buffers = 2,
+                                           .num_uniform_buffers = 1,
+                                           .threadcount_x = 64,
+                                           .threadcount_y = 1,
+                                           .threadcount_z = 1},
+        "brick-compute");
     if (!vxray_instance.brick_quad_compute_pipeline)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create brick-quad compute pipeline: %s",
@@ -987,9 +1068,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
-        vxray_instance.brick_quad_pipeline = SDL_CreateGPUGraphicsPipeline(
+        vxray_instance.brick_quad_pipeline = vx_create_gpu_graphics_pipeline(
             vxray_instance.gpu_device,
-            &(SDL_GPUGraphicsPipelineCreateInfo){
+            (SDL_GPUGraphicsPipelineCreateInfo){
                 .vertex_shader = vertex_shader,
                 .fragment_shader = fragment_shader,
                 .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
@@ -1000,13 +1081,15 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     (SDL_GPUDepthStencilState){.compare_op = SDL_GPU_COMPAREOP_LESS,
                                                .enable_depth_test = true,
                                                .enable_depth_write = true},
-                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 1,
-                    .color_target_descriptions =
-                        (SDL_GPUColorTargetDescription[]){
-                            {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT}},
-                    .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-                    .has_depth_stencil_target = true}});
+                .target_info =
+                    (SDL_GPUGraphicsPipelineTargetInfo){
+                        .num_color_targets = 1,
+                        .color_target_descriptions =
+                            (SDL_GPUColorTargetDescription[]){
+                                {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT}},
+                        .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                        .has_depth_stencil_target = true}},
+            "brick-raster");
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
         if (!vxray_instance.brick_quad_pipeline)
@@ -1052,9 +1135,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
-        vxray_instance.gbuffer_pipeline = SDL_CreateGPUGraphicsPipeline(
+        vxray_instance.gbuffer_pipeline = vx_create_gpu_graphics_pipeline(
             vxray_instance.gpu_device,
-            &(SDL_GPUGraphicsPipelineCreateInfo){
+            (SDL_GPUGraphicsPipelineCreateInfo){
                 .vertex_shader = vertex_shader,
                 .fragment_shader = fragment_shader,
                 .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
@@ -1066,14 +1149,16 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     (SDL_GPUDepthStencilState){.compare_op = SDL_GPU_COMPAREOP_ALWAYS,
                                                .enable_depth_test = true,
                                                .enable_depth_write = true},
-                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 2,
-                    .color_target_descriptions =
-                        (SDL_GPUColorTargetDescription[]){
-                            {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT},
-                            {.format = SDL_GPU_TEXTUREFORMAT_R8_UINT}},
-                    .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-                    .has_depth_stencil_target = true}});
+                .target_info =
+                    (SDL_GPUGraphicsPipelineTargetInfo){
+                        .num_color_targets = 2,
+                        .color_target_descriptions =
+                            (SDL_GPUColorTargetDescription[]){
+                                {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT},
+                                {.format = SDL_GPU_TEXTUREFORMAT_R8_UINT}},
+                        .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                        .has_depth_stencil_target = true}},
+            "gbuffer-raster");
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
         if (!vxray_instance.gbuffer_pipeline)
@@ -1086,19 +1171,20 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
     // RTAO spatial-cache update pipeline
 
-    vxray_instance.rtao_pipeline = SDL_CreateGPUComputePipeline(
+    vxray_instance.rtao_pipeline = vx_create_gpu_compute_pipeline(
         vxray_instance.gpu_device,
-        &(SDL_GPUComputePipelineCreateInfo){.code_size = RTAO_CS_SIZE,
-                                            .code = RTAO_CS_BYTES,
-                                            .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                            .format = GPU_SHADER_FORMAT,
-                                            .num_samplers = 1,
-                                            .num_readonly_storage_textures = 2,
-                                            .num_readwrite_storage_buffers = 3,
-                                            .num_uniform_buffers = 1,
-                                            .threadcount_x = 8,
-                                            .threadcount_y = 8,
-                                            .threadcount_z = 1});
+        (SDL_GPUComputePipelineCreateInfo){.code_size = RTAO_CS_SIZE,
+                                           .code = RTAO_CS_BYTES,
+                                           .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                           .format = GPU_SHADER_FORMAT,
+                                           .num_samplers = 1,
+                                           .num_readonly_storage_textures = 2,
+                                           .num_readwrite_storage_buffers = 3,
+                                           .num_uniform_buffers = 1,
+                                           .threadcount_x = 8,
+                                           .threadcount_y = 8,
+                                           .threadcount_z = 1},
+        "rtao-compute");
     if (!vxray_instance.rtao_pipeline)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create RTAO compute pipeline: %s",
@@ -1142,9 +1228,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
-        vxray_instance.rtao_visibility_pipeline = SDL_CreateGPUGraphicsPipeline(
+        vxray_instance.rtao_visibility_pipeline = vx_create_gpu_graphics_pipeline(
             vxray_instance.gpu_device,
-            &(SDL_GPUGraphicsPipelineCreateInfo){
+            (SDL_GPUGraphicsPipelineCreateInfo){
                 .vertex_shader = vertex_shader,
                 .fragment_shader = fragment_shader,
                 .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
@@ -1152,10 +1238,13 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
                                              .cull_mode = SDL_GPU_CULLMODE_BACK,
                                              .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
-                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 1,
-                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT}}}});
+                .target_info =
+                    (SDL_GPUGraphicsPipelineTargetInfo){
+                        .num_color_targets = 1,
+                        .color_target_descriptions =
+                            (SDL_GPUColorTargetDescription[]){
+                                {.format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT}}}},
+            "rtao-raster");
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
         if (!vxray_instance.rtao_visibility_pipeline)
@@ -1201,9 +1290,9 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             return SDL_APP_FAILURE;
         }
 
-        vxray_instance.display_pipeline = SDL_CreateGPUGraphicsPipeline(
+        vxray_instance.display_pipeline = vx_create_gpu_graphics_pipeline(
             vxray_instance.gpu_device,
-            &(SDL_GPUGraphicsPipelineCreateInfo){
+            (SDL_GPUGraphicsPipelineCreateInfo){
                 .vertex_shader = vertex_shader,
                 .fragment_shader = fragment_shader,
                 .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
@@ -1211,11 +1300,14 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
                                              .cull_mode = SDL_GPU_CULLMODE_BACK,
                                              .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
-                .target_info = (SDL_GPUGraphicsPipelineTargetInfo){
-                    .num_color_targets = 1,
-                    .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
-                        {.format = SDL_GetGPUSwapchainTextureFormat(vxray_instance.gpu_device,
-                                                                    vxray_instance.window)}}}});
+                .target_info =
+                    (SDL_GPUGraphicsPipelineTargetInfo){
+                        .num_color_targets = 1,
+                        .color_target_descriptions =
+                            (SDL_GPUColorTargetDescription[]){
+                                {.format = SDL_GetGPUSwapchainTextureFormat(
+                                     vxray_instance.gpu_device, vxray_instance.window)}}}},
+            "display-raster");
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
         SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
         if (!vxray_instance.display_pipeline)
@@ -1281,17 +1373,18 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 
             {
                 uint32_t const        voxel_buffer_size = (uint32_t)scene.voxel_grid.count;
-                SDL_GPUTexture* const voxel_texture = SDL_CreateGPUTexture(
-                    device, &(SDL_GPUTextureCreateInfo){
-                                .type = SDL_GPU_TEXTURETYPE_3D,
-                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
-                                .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                                         SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
-                                .width = scene.grid_ext,
-                                .height = scene.grid_ext,
-                                .layer_count_or_depth = scene.grid_ext,
-                                .num_levels = 1,
-                                .sample_count = SDL_GPU_SAMPLECOUNT_1});
+                SDL_GPUTexture* const voxel_texture = vx_create_gpu_texture(
+                    device,
+                    (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                               .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                               .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                                        SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                               .width = scene.grid_ext,
+                                               .height = scene.grid_ext,
+                                               .layer_count_or_depth = scene.grid_ext,
+                                               .num_levels = 1,
+                                               .sample_count = SDL_GPU_SAMPLECOUNT_1},
+                    "voxels");
                 if (!voxel_texture)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create voxel texture: %s",
@@ -1309,17 +1402,18 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             }
             {
                 uint32_t const        brick_grid_size = (uint32_t)scene.brick_grid.count;
-                SDL_GPUTexture* const brick_texture = SDL_CreateGPUTexture(
-                    device, &(SDL_GPUTextureCreateInfo){
-                                .type = SDL_GPU_TEXTURETYPE_3D,
-                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
-                                .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                                         SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
-                                .width = scene.brick_grid_ext,
-                                .height = scene.brick_grid_ext,
-                                .layer_count_or_depth = scene.brick_grid_ext,
-                                .num_levels = 1,
-                                .sample_count = SDL_GPU_SAMPLECOUNT_1});
+                SDL_GPUTexture* const brick_texture = vx_create_gpu_texture(
+                    device,
+                    (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                               .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                               .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                                        SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                               .width = scene.brick_grid_ext,
+                                               .height = scene.brick_grid_ext,
+                                               .layer_count_or_depth = scene.brick_grid_ext,
+                                               .num_levels = 1,
+                                               .sample_count = SDL_GPU_SAMPLECOUNT_1},
+                    "brick-coordinates");
                 if (!brick_texture)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create brick grid texture: %s",
@@ -1338,10 +1432,11 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             {
                 uint32_t const palette_size = 4 * 256;
                 assert(palette_size == sizeof(scene.palette));
-                SDL_GPUBuffer* const palette_buffer = SDL_CreateGPUBuffer(
+                SDL_GPUBuffer* const palette_buffer = vx_create_gpu_buffer(
                     device,
-                    &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
-                                               .size = palette_size});
+                    (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                                              .size = palette_size},
+                    "palette");
                 if (!palette_buffer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create palette buffer: %s",
@@ -1361,11 +1456,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             {
                 uint32_t const visible_faces_size =
                     vxray_instance.face_capacity * (uint32_t)sizeof(uint32_t);
-                SDL_GPUBuffer* const visible_faces_buffer = SDL_CreateGPUBuffer(
+                SDL_GPUBuffer* const visible_faces_buffer = vx_create_gpu_buffer(
                     device,
-                    &(SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
-                                                        SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
-                                               .size = visible_faces_size});
+                    (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
+                                                       SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+                                              .size = visible_faces_size},
+                    "visible-faces");
                 if (!visible_faces_buffer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create visible-face buffer: %s",
@@ -1376,11 +1472,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 vxray_instance.visible_faces_buffer = visible_faces_buffer;
             }
             {
-                SDL_GPUBuffer* const indirect_draw_buffer = SDL_CreateGPUBuffer(
-                    device, &(SDL_GPUBufferCreateInfo){
-                                .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
-                                         SDL_GPU_BUFFERUSAGE_INDIRECT,
-                                .size = (uint32_t)sizeof(SDL_GPUIndirectDrawCommand)});
+                SDL_GPUBuffer* const indirect_draw_buffer = vx_create_gpu_buffer(
+                    device,
+                    (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
+                                                       SDL_GPU_BUFFERUSAGE_INDIRECT,
+                                              .size = (uint32_t)sizeof(SDL_GPUIndirectDrawCommand)},
+                    "indirect-draw");
                 if (!indirect_draw_buffer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create indirect draw buffer: %s",
@@ -1391,10 +1488,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 vxray_instance.indirect_draw_buffer = indirect_draw_buffer;
             }
             {
-                SDL_GPUTransferBuffer* const reset_transfer_buffer = SDL_CreateGPUTransferBuffer(
-                    device, &(SDL_GPUTransferBufferCreateInfo){
-                                .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                                .size = (uint32_t)sizeof(SDL_GPUIndirectDrawCommand)});
+                SDL_GPUTransferBuffer* const reset_transfer_buffer = vx_create_gpu_transfer_buffer(
+                    device,
+                    (SDL_GPUTransferBufferCreateInfo){
+                        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                        .size = (uint32_t)sizeof(SDL_GPUIndirectDrawCommand)},
+                    "indirect-reset");
                 if (!reset_transfer_buffer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU,
@@ -1411,10 +1510,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
                              SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
                     .size = ao_buffer_size};
-                SDL_GPUBuffer* const checksum_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
-                SDL_GPUBuffer* const payload_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
+                SDL_GPUBuffer* const checksum_buffer =
+                    vx_create_gpu_buffer(device, buffer_info, "ao-checksum");
+                SDL_GPUBuffer* const payload_buffer =
+                    vx_create_gpu_buffer(device, buffer_info, "ao-payload");
                 SDL_GPUBuffer* const last_touched_frame_buffer =
-                    SDL_CreateGPUBuffer(device, &buffer_info);
+                    vx_create_gpu_buffer(device, buffer_info, "ao-last-touched-frame");
                 if (!checksum_buffer || !payload_buffer || !last_touched_frame_buffer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create AO hash buffers: %s",
@@ -1435,10 +1536,11 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     return SDL_APP_FAILURE;
                 }
 
-                SDL_GPUTransferBuffer* const reset_transfer = SDL_CreateGPUTransferBuffer(
+                SDL_GPUTransferBuffer* const reset_transfer = vx_create_gpu_transfer_buffer(
                     device,
-                    &(SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                                                       .size = ao_buffer_size});
+                    (SDL_GPUTransferBufferCreateInfo){.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+                                                      .size = ao_buffer_size},
+                    "ao-reset");
                 if (!reset_transfer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU,
