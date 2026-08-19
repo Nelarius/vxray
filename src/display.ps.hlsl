@@ -14,6 +14,9 @@ Texture2D<uint>  entry_bricks : register(t2, space2);
 Texture2D<uint>  albedo_tex : register(t3, space2);
 Texture2D<uint>  normal_tex : register(t4, space2);
 
+SamplerState depth_sampler : register(s0, space2);
+SamplerState visibility_sampler : register(s1, space2);
+
 ConstantBuffer<display_uniforms> uniforms : register(b0, space3);
 
 static float4 const BACKGROUND_COLOR = float4(0.02, 0.025, 0.03, 1.0);
@@ -71,8 +74,9 @@ float4 main(ps_input const input) : SV_Target0
 {
     uint width, height;
     depth_tex.GetDimensions(width, height);
-    uint2 const pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
-    float const surface_depth = depth_tex.Load(int3(pixel, 0)).r;
+    uint2 const  pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
+    float2 const pixel_uv = (float2(pixel) + 0.5) / float2(width, height);
+    float const  surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
 
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY ||
@@ -101,7 +105,7 @@ float4 main(ps_input const input) : SV_Target0
             return float4(cell_size_color(cell_size, uniforms.smin), 1.0);
         }
 
-        float const visibility = visibility_tex.Load(texel).r;
+        float const visibility = visibility_tex.SampleLevel(visibility_sampler, pixel_uv, 0.0).r;
         if (visibility < 0.0)
         {
             return CACHE_FAILURE_COLOR;
