@@ -35,6 +35,15 @@ int16_t3 unpack_brick_cell(uint const packed)
     return int16_t3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u);
 }
 
+float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
+                          float3 const p1)
+{
+    float3 const t0 = (p0 - ray_origin) * inv_ray_dir;
+    float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
+    float3 const lo = min(t0, t1);
+    return max(max(lo.x, lo.y), max(lo.z, 0.0));
+}
+
 // NOTE: ext is expected to be a power of two
 int mask_linear_idx(int16_t3 const coord, int const ext)
 {
@@ -57,8 +66,17 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir,
     float3 const inv_dir = 1.0 / ray_dir;
     float3 const t_start = (step(0.0, ray_dir) - ray_origin) * inv_dir;
 
-    int16_t3 ipos = entry_brick_cell * VX_BRICK_EXT;
-    for (;;)
+    int16_t3 ipos;
+    {
+        int3 const brick_min = int3(entry_brick_cell) * VX_BRICK_EXT;
+        int3 const brick_max = brick_min + (int3)VX_BRICK_EXT;
+        float t = aabb_entry_distance(ray_origin, inv_dir, float3(brick_min), float3(brick_max));
+        t = asfloat(asuint(t) + 5u); // bias forward slightly. TODO: offset using face normal
+        float3 const pos = ray_origin + t * ray_dir;
+        ipos = int16_t3(floor(pos));
+    }
+
+    for (int i = 0; i < 256; ++i)
     {
         if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
         {
@@ -97,6 +115,7 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir,
             uint const mask_part = mask_idx < 32 ? mask.x : mask.y;
             // Is the containing 2x2x2 region empty?
             // 0x0A preserves the high bits of the 2x2x2 block's local x and y coordinates.
+            // 0x00330033 selects the relevant 2x2x2 bits.
             if (((mask_part >> (mask_idx & 0x0A)) & 0x00330033u) == 0)
             {
                 lod = 2;
