@@ -5,7 +5,7 @@
 
 Texture2D<float> depth_tex : register(t0, space0);
 Texture2D<uint>  normal_tex : register(t1, space0);
-Texture3D<uint>  voxel_tex : register(t2, space0);
+Texture3D<uint>  voxel_mask_tex : register(t2, space0);
 SamplerState     depth_sampler : register(s0, space0);
 
 RWStructuredBuffer<uint> hash_checksums : register(u0, space1);
@@ -59,6 +59,14 @@ float3 orient_sample_direction(float3 const v, float3 const n)
     return float3(v.x, v.y, v.z * n.z);
 }
 
+int mask_bit_index(int16_t3 const cell, int const ext)
+{
+    int x = cell.x & (ext - 1);
+    int y = cell.y & (ext - 1);
+    int z = cell.z & (ext - 1);
+    return x + y * ext + z * ext * ext;
+}
+
 bool dda(float3 const pos, float3 const dir, float const t_max)
 {
     float3 const inv_dir = 1.0 / dir;
@@ -85,7 +93,10 @@ bool dda(float3 const pos, float3 const dir, float const t_max)
         {
             return false;
         }
-        if (voxel_tex.Load(int4(voxel, 0)).r != 0u)
+        uint const mask = voxel_mask_tex.Load(int4((int3)voxel / VX_MASK_EXT, 0)).r;
+        uint const idx = mask_bit_index(voxel, VX_MASK_EXT);
+        uint const bit = 1u << (idx & 31u);
+        if ((mask & bit) != 0)
         {
             return true;
         }
