@@ -31,7 +31,6 @@ set(VXRAY_SHADER_SOURCES
         display.ps.hlsl
         fullscreen.vs.hlsl
         gbuffer.ps.hlsl
-        rtao.cs.hlsl
         rtao.ps.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
@@ -96,7 +95,6 @@ set(VXRAY_SOURCES
         gbuffer.ps.hlsl
         hlsl_shim.h
         rtao.h
-        rtao.cs.hlsl
         rtao.ps.hlsl
         spatial_hash.hlsli
         shared.hlsli
