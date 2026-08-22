@@ -694,6 +694,7 @@ typedef struct vxray
     vx_camera camera;
     vx_input  input;
     int       display_texture;
+    float     rtao_radius;
     float     ao_sp;
     float     ao_smin;
     uint32_t  frame_index;
@@ -914,6 +915,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
 
+    vxray_instance.rtao_radius = 8.f;
     vxray_instance.ao_sp = 10.f;
     vxray_instance.ao_smin = 0.07f;
 
@@ -1708,9 +1710,11 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                          VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY);
     igRadioButton_IntPtr("Cell size", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_CELL_SIZE);
-    igSliderFloat("sp", &vxray_instance.ao_sp, 1.f, 16.f, "%.1f px", 0);
-    igSliderFloat("smin", &vxray_instance.ao_smin, 0.01f, 2.f, "%.3f",
-                  ImGuiSliderFlags_Logarithmic);
+    bool invalidate_ao =
+        igSliderFloat("rtao_radius", &vxray_instance.rtao_radius, 8.f, 16.f, "%.1f voxels", 0);
+    invalidate_ao |= igSliderFloat("sp", &vxray_instance.ao_sp, 1.f, 16.f, "%.1f px", 0);
+    invalidate_ao |= igSliderFloat("smin", &vxray_instance.ao_smin, 0.01f, 2.f, "%.3f",
+                                   ImGuiSliderFlags_Logarithmic);
     igText("Face capacity: %u", vxray_instance.face_capacity);
     igEnd();
     igRender();
@@ -1759,6 +1763,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
 
     assert(width > 0u);
     assert(height > 0u);
+    assert(isfinite(vxray_instance.rtao_radius) && vxray_instance.rtao_radius >= 8.f &&
+           vxray_instance.rtao_radius <= 16.f);
     assert(isfinite(vxray_instance.ao_sp) && vxray_instance.ao_sp > 0.f);
     assert(isfinite(vxray_instance.ao_smin) && vxray_instance.ao_smin > 0.f);
 
@@ -1789,7 +1795,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     rtao_uniforms const rtao_uniform_data = {
         .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
         .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
-        .rtao_radius = (float)VX_BRICK_EXT,
+        .rtao_radius = vxray_instance.rtao_radius,
         .sp = vxray_instance.ao_sp,
         .smin = vxray_instance.ao_smin,
         .vertical_fov = fov,
@@ -1829,7 +1835,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                .offset = 0,
                                .size = (uint32_t)sizeof(indirect_command)},
         true);
-    if (vxray_instance.frame_index == 0u)
+    if (vxray_instance.frame_index == 0u || invalidate_ao)
     {
         uint32_t const ao_buffer_size = (uint32_t)(VX_AO_HASH_CAPACITY * sizeof(uint32_t));
         SDL_GPUTransferBufferLocation const reset_source = {
