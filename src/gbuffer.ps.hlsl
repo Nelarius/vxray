@@ -13,12 +13,9 @@ ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
 Texture2D<uint>        brick_coord_tex : register(t0, space2);
 Texture3D<uint>        voxel_tex : register(t1, space2);
-Texture3D<uint>        brick_tex : register(t2, space2);
-StructuredBuffer<uint> palette_rgba : register(t3, space2);
-
-uint voxel_at(int16_t3 const p) { return voxel_tex.Load(int4(p, 0)).r; }
-
-uint brick_at(int16_t3 const p) { return brick_tex.Load(int4(p, 0)).r; }
+Texture3D<uint>        voxel_mask_tex : register(t2, space2);
+Texture3D<uint>        brick_mask_tex : register(t3, space2);
+StructuredBuffer<uint> palette_rgba : register(t4, space2);
 
 uint pack_voxel_cell(int16_t3 const cell)
 {
@@ -45,8 +42,11 @@ bool camera_is_inside_occupied_brick()
         return false;
     }
 
-    int16_t3 const camera_brick = int16_t3(camera_position / (float)VX_BRICK_EXT);
-    return brick_at(camera_brick) > 0u;
+    int16_t3 const camera_cell = int16_t3(camera_position / (float)VX_BRICK_EXT);
+    uint const     mask = brick_mask_tex.Load(int4(camera_cell / VX_MASK_EXT, 0)).r;
+    uint const     idx = mask_bit_index(camera_cell, VX_MASK_EXT);
+    uint const     bit = 1u << (idx & 31u);
+    return (mask & bit) != 0u;
 }
 
 float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
@@ -82,7 +82,10 @@ uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
         }
 
         int16_t3 const cell = brick_min + local_cell;
-        if (voxel_at(cell) > 0u)
+        uint const     mask = voxel_mask_tex.Load(int4(cell / VX_MASK_EXT, 0)).r;
+        uint const     idx = mask_bit_index(cell, VX_MASK_EXT);
+        uint const     bit = 1u << (idx & 31u);
+        if ((mask & bit) != 0)
         {
             return pack_voxel_cell(cell);
         }
@@ -117,7 +120,10 @@ uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
             return VX_NO_CELL;
         }
 
-        if (brick_at(brick_cell) > 0u)
+        uint const mask = brick_mask_tex.Load(int4(brick_cell / VX_MASK_EXT, 0)).r;
+        uint const idx = mask_bit_index(brick_cell, VX_MASK_EXT);
+        uint const bit = 1u << (idx & 31u);
+        if ((mask & bit) != 0u)
         {
             uint const packed_cell = trace_brick(origin, dir, inv_dir, delta_dist, brick_cell);
             if (packed_cell != VX_NO_CELL)
@@ -210,9 +216,10 @@ ps_output main(ps_input const input)
 
     float3 const hit_position = uniforms.camera_pos.xyz + intersection.distance * dir;
     float4 const clip_position = mul(uniforms.view_projection, float4(hit_position, 1.0));
+    uint const   voxel = voxel_tex.Load(int4(cell, 0)).r;
 
     ps_output output;
-    output.albedo = palette_rgba[voxel_at(cell)];
+    output.albedo = palette_rgba[voxel];
     output.normal = pack_normal(intersection.normal);
     output.depth = clip_position.z / clip_position.w;
     return output;

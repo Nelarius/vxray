@@ -1,5 +1,13 @@
 #pragma once
 
+int mask_bit_index(int16_t3 const cell, int const ext)
+{
+    int x = cell.x & (ext - 1);
+    int y = cell.y & (ext - 1);
+    int z = cell.z & (ext - 1);
+    return x + y * ext + z * ext * ext;
+}
+
 uint pack_normal(float3 const normal)
 {
     if (normal.x != 0.0)

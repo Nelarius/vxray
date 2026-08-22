@@ -148,14 +148,15 @@ typedef struct vx_scene
     vx_buffer(uint8_t) voxel_grid;
     vx_buffer(uint8_t) rtao_voxel_mask;
     vx_buffer(uint8_t) brick_grid;
+    vx_buffer(uint8_t) brick_mask;
     uint  palette[256];
     int   grid_ext;
     int   brick_grid_ext;
     vec3s center;
 } vx_scene;
 
-// Loads a MagicaVoxel scene into dense voxel, RTAO-mask, and brick grids. Free all grids with
-// `vx_buffer_free`.
+// Loads a MagicaVoxel scene into dense voxel, RTAO-mask, brick-grid, and brick-mask data. Free
+// all grids with `vx_buffer_free`.
 static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 {
     assert(vox_path);
@@ -164,6 +165,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     vx_buffer(uint8_t) voxel_grid = {0};
     vx_buffer(uint8_t) rtao_voxel_mask = {0};
     vx_buffer(uint8_t) brick_grid = {0};
+    vx_buffer(uint8_t) brick_mask = {0};
     cvox_scene const* scene = 0;
     {
         size_t   num_bytes;
@@ -291,6 +293,15 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             goto cleanup_grids;
         }
 
+        int const brick_mask_ext = SDL_max(1, brick_grid_ext / VX_MASK_EXT);
+        int const brick_mask_count = brick_mask_ext * brick_mask_ext * brick_mask_ext;
+        brick_mask = vx_buffer_calloc(uint8_t, brick_mask_count);
+        if (!brick_mask.ptr)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate brick occupancy mask");
+            goto cleanup_grids;
+        }
+
         for (int i = 0; i < (int)scene->num_instances; ++i)
         {
             cvox_instance const* const instance = &scene->instances[i];
@@ -356,6 +367,18 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
                                 vx_grid_index(brick_x, brick_y, brick_z, brick_grid_ext);
                             assert(brick_idx >= 0 && brick_idx < brick_grid.count);
                             brick_grid.ptr[brick_idx] = 1;
+
+                            int const brick_mask_idx =
+                                vx_grid_index(brick_x / VX_MASK_EXT, brick_y / VX_MASK_EXT,
+                                              brick_z / VX_MASK_EXT, brick_mask_ext);
+                            assert(brick_mask_idx >= 0 && brick_mask_idx < brick_mask.count);
+                            // Each R8 texel stores a VX_MASK_EXT cubed brick block in x + y * ext
+                            // + z * ext * ext bit order.
+                            int const brick_mask_bit =
+                                (brick_x & (VX_MASK_EXT - 1)) +
+                                (brick_y & (VX_MASK_EXT - 1)) * VX_MASK_EXT +
+                                (brick_z & (VX_MASK_EXT - 1)) * VX_MASK_EXT * VX_MASK_EXT;
+                            brick_mask.ptr[brick_mask_idx] |= (uint8_t)(1u << brick_mask_bit);
                         }
                     }
                 }
@@ -371,6 +394,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     out_scene->voxel_grid = voxel_grid;
     out_scene->rtao_voxel_mask = rtao_voxel_mask;
     out_scene->brick_grid = brick_grid;
+    out_scene->brick_mask = brick_mask;
     for (int i = 0; i < 256; ++i)
     {
         cvox_rgba const color = scene->palette.color[i];
@@ -381,6 +405,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     return true;
 
 cleanup_grids:
+    vx_buffer_free(brick_mask);
     vx_buffer_free(brick_grid);
     vx_buffer_free(rtao_voxel_mask);
     vx_buffer_free(voxel_grid);
@@ -393,9 +418,11 @@ cleanup_scene:
 static void vx_scene_free(vx_scene* const scene)
 {
     assert(scene);
+    vx_buffer_free(scene->brick_mask);
     vx_buffer_free(scene->brick_grid);
     vx_buffer_free(scene->rtao_voxel_mask);
     vx_buffer_free(scene->voxel_grid);
+    scene->brick_mask = (vx_buffer(uint8_t)){0};
     scene->brick_grid = (vx_buffer(uint8_t)){0};
     scene->rtao_voxel_mask = (vx_buffer(uint8_t)){0};
     scene->voxel_grid = (vx_buffer(uint8_t)){0};
@@ -741,6 +768,7 @@ typedef struct vxray
     SDL_GPUTexture*          voxel_texture;
     SDL_GPUTexture*          rtao_voxel_mask_texture;
     SDL_GPUTexture*          brick_texture;
+    SDL_GPUTexture*          brick_mask_texture;
     SDL_GPUTexture*          entry_depth_texture;
     SDL_GPUTexture*          entry_brick_texture;
     SDL_GPUTexture*          gbuffer_albedo_texture;
@@ -1143,7 +1171,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_storage_textures = 3,
+                                                 .num_storage_textures = 4,
                                                  .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -1355,6 +1383,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             }
             assert(scene.voxel_grid.ptr);
             assert(scene.rtao_voxel_mask.ptr);
+            assert(scene.brick_mask.ptr);
             assert(scene.grid_ext);
             vxray_instance.grid_ext = scene.grid_ext;
             vxray_instance.brick_grid_ext = scene.brick_grid_ext;
@@ -1416,7 +1445,8 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     device,
                     (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
                                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
-                                               .usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                               .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                                        SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
                                                .width = (uint32_t)rtao_mask_ext,
                                                .height = (uint32_t)rtao_mask_ext,
                                                .layer_count_or_depth = (uint32_t)rtao_mask_ext,
@@ -1468,6 +1498,39 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     return SDL_APP_FAILURE;
                 }
                 vxray_instance.brick_texture = brick_texture;
+            }
+            {
+                int const      brick_mask_ext = SDL_max(1, scene.brick_grid_ext / VX_MASK_EXT);
+                uint32_t const brick_mask_size = (uint32_t)scene.brick_mask.count;
+                assert(brick_mask_size ==
+                       (uint32_t)(brick_mask_ext * brick_mask_ext * brick_mask_ext));
+                SDL_GPUTexture* const brick_mask_texture = vx_create_gpu_texture(
+                    device,
+                    (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                               .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                               .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                               .width = (uint32_t)brick_mask_ext,
+                                               .height = (uint32_t)brick_mask_ext,
+                                               .layer_count_or_depth = (uint32_t)brick_mask_ext,
+                                               .num_levels = 1,
+                                               .sample_count = SDL_GPU_SAMPLECOUNT_1},
+                    "brick-occupancy-mask");
+                if (!brick_mask_texture)
+                {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                                 "Failed to create brick occupancy mask texture: %s",
+                                 SDL_GetError());
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                if (!vx_gpu_texture_upload(device, brick_mask_texture, scene.brick_mask.ptr,
+                                           brick_mask_size, (uint32_t)brick_mask_ext))
+                {
+                    SDL_ReleaseGPUTexture(device, brick_mask_texture);
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                vxray_instance.brick_mask_texture = brick_mask_texture;
             }
             {
                 uint32_t const palette_size = 4 * 256;
@@ -1974,7 +2037,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPUTexture* const storage_textures[] = {
         vxray_instance.entry_brick_texture,
         vxray_instance.voxel_texture,
-        vxray_instance.brick_texture,
+        vxray_instance.rtao_voxel_mask_texture,
+        vxray_instance.brick_mask_texture,
     };
     SDL_BindGPUFragmentStorageTextures(gbuffer_pass, 0, storage_textures,
                                        SDL_arraysize(storage_textures));
@@ -2131,6 +2195,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.brick_texture);
         vxray_instance.brick_texture = 0;
+    }
+
+    if (vxray_instance.brick_mask_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.brick_mask_texture);
+        vxray_instance.brick_mask_texture = 0;
     }
 
     if (vxray_instance.voxel_texture)

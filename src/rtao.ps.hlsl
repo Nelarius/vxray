@@ -1,6 +1,7 @@
 #include "constants.h"
 #include "rtao.h"
 
+#include "shared.hlsli"
 #include "spatial_hash.hlsli"
 
 struct ps_input
@@ -62,14 +63,6 @@ float3 orient_sample_direction(float3 const v, float3 const n)
         return float3(v.x, v.z * n.y, v.y);
     }
     return float3(v.x, v.y, v.z * n.z);
-}
-
-int mask_bit_index(int16_t3 const cell, int const ext)
-{
-    int x = cell.x & (ext - 1);
-    int y = cell.y & (ext - 1);
-    int z = cell.z & (ext - 1);
-    return x + y * ext + z * ext * ext;
 }
 
 bool dda(float3 const pos, float3 const dir, float const t_max)
