@@ -146,6 +146,7 @@ static int vx_grid_index(int const x, int const y, int const z, int const grid_e
 typedef struct vx_scene
 {
     vx_buffer(uint8_t) voxel_grid;
+    vx_buffer(uint8_t) rtao_voxel_mask;
     vx_buffer(uint8_t) brick_grid;
     uint  palette[256];
     int   grid_ext;
@@ -153,7 +154,7 @@ typedef struct vx_scene
     vec3s center;
 } vx_scene;
 
-// Loads a MagicaVoxel scene into dense voxel and brick grids. Free both grids with
+// Loads a MagicaVoxel scene into dense voxel, RTAO-mask, and brick grids. Free all grids with
 // `vx_buffer_free`.
 static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 {
@@ -161,6 +162,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     assert(out_scene);
 
     vx_buffer(uint8_t) voxel_grid = {0};
+    vx_buffer(uint8_t) rtao_voxel_mask = {0};
     vx_buffer(uint8_t) brick_grid = {0};
     cvox_scene const* scene = 0;
     {
@@ -269,6 +271,17 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             goto cleanup_scene;
         }
 
+        int const rtao_mask_ext = grid_ext / VX_MASK_EXT;
+        assert(rtao_mask_ext > 0);
+        int const rtao_mask_count = rtao_mask_ext * rtao_mask_ext * rtao_mask_ext;
+        assert(rtao_mask_count == total_voxels / (VX_MASK_EXT * VX_MASK_EXT * VX_MASK_EXT));
+        rtao_voxel_mask = vx_buffer_calloc(uint8_t, rtao_mask_count);
+        if (!rtao_voxel_mask.ptr)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate RTAO voxel mask");
+            goto cleanup_grids;
+        }
+
         int const brick_grid_ext = grid_ext / VX_BRICK_EXT;
         int const total_bricks = brick_grid_ext * brick_grid_ext * brick_grid_ext;
         brick_grid = vx_buffer_calloc(uint8_t, total_bricks);
@@ -325,6 +338,17 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
                             assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
                             voxel_grid.ptr[dest_idx] = voxel;
 
+                            int const rtao_mask_idx =
+                                vx_grid_index(dx / VX_MASK_EXT, dy / VX_MASK_EXT, dz / VX_MASK_EXT,
+                                              rtao_mask_ext);
+                            assert(rtao_mask_idx >= 0 && rtao_mask_idx < rtao_voxel_mask.count);
+                            // Each R8 texel stores a VX_MASK_EXT cubed voxel block in x + y * ext
+                            // + z * ext * ext bit order.
+                            int const rtao_mask_bit =
+                                (dx & (VX_MASK_EXT - 1)) + (dy & (VX_MASK_EXT - 1)) * VX_MASK_EXT +
+                                (dz & (VX_MASK_EXT - 1)) * VX_MASK_EXT * VX_MASK_EXT;
+                            rtao_voxel_mask.ptr[rtao_mask_idx] |= (uint8_t)(1u << rtao_mask_bit);
+
                             int const brick_x = dx / VX_BRICK_EXT;
                             int const brick_y = dy / VX_BRICK_EXT;
                             int const brick_z = dz / VX_BRICK_EXT;
@@ -345,6 +369,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     }
 
     out_scene->voxel_grid = voxel_grid;
+    out_scene->rtao_voxel_mask = rtao_voxel_mask;
     out_scene->brick_grid = brick_grid;
     for (int i = 0; i < 256; ++i)
     {
@@ -357,6 +382,7 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 
 cleanup_grids:
     vx_buffer_free(brick_grid);
+    vx_buffer_free(rtao_voxel_mask);
     vx_buffer_free(voxel_grid);
 cleanup_scene:
     assert(scene);
@@ -368,8 +394,10 @@ static void vx_scene_free(vx_scene* const scene)
 {
     assert(scene);
     vx_buffer_free(scene->brick_grid);
+    vx_buffer_free(scene->rtao_voxel_mask);
     vx_buffer_free(scene->voxel_grid);
     scene->brick_grid = (vx_buffer(uint8_t)){0};
+    scene->rtao_voxel_mask = (vx_buffer(uint8_t)){0};
     scene->voxel_grid = (vx_buffer(uint8_t)){0};
 }
 
@@ -496,7 +524,7 @@ static bool vx_gpu_buffer_upload(SDL_GPUDevice* const device, SDL_GPUBuffer* con
 }
 
 static bool vx_gpu_texture_upload(SDL_GPUDevice* const device, SDL_GPUTexture* const texture,
-                                  void* const data, uint32_t const size, uint32_t grid_ext)
+                                  void const* const data, uint32_t const size, uint32_t grid_ext)
 {
     SDL_GPUTransferBuffer* const transfer = vx_create_gpu_transfer_buffer(
         device,
@@ -712,6 +740,7 @@ typedef struct vxray
     SDL_GPUGraphicsPipeline* brick_quad_pipeline;
     SDL_GPUComputePipeline*  brick_quad_compute_pipeline;
     SDL_GPUTexture*          voxel_texture;
+    SDL_GPUTexture*          rtao_voxel_mask_texture;
     SDL_GPUTexture*          brick_texture;
     SDL_GPUTexture*          entry_depth_texture;
     SDL_GPUTexture*          entry_brick_texture;
@@ -1350,6 +1379,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 return SDL_APP_FAILURE;
             }
             assert(scene.voxel_grid.ptr);
+            assert(scene.rtao_voxel_mask.ptr);
             assert(scene.grid_ext);
             vxray_instance.grid_ext = scene.grid_ext;
             vxray_instance.brick_grid_ext = scene.brick_grid_ext;
@@ -1401,6 +1431,39 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     return SDL_APP_FAILURE;
                 }
                 vxray_instance.voxel_texture = voxel_texture;
+            }
+            {
+                int const      rtao_mask_ext = scene.grid_ext / VX_MASK_EXT;
+                uint32_t const rtao_mask_size = (uint32_t)scene.rtao_voxel_mask.count;
+                assert(rtao_mask_ext > 0);
+                assert(rtao_mask_size == (uint32_t)(rtao_mask_ext * rtao_mask_ext * rtao_mask_ext));
+                SDL_GPUTexture* const rtao_voxel_mask_texture = vx_create_gpu_texture(
+                    device,
+                    (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                               .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                               .usage = SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                               .width = (uint32_t)rtao_mask_ext,
+                                               .height = (uint32_t)rtao_mask_ext,
+                                               .layer_count_or_depth = (uint32_t)rtao_mask_ext,
+                                               .num_levels = 1,
+                                               .sample_count = SDL_GPU_SAMPLECOUNT_1},
+                    "rtao-voxel-mask");
+                if (!rtao_voxel_mask_texture)
+                {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create RTAO voxel mask: %s",
+                                 SDL_GetError());
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                if (!vx_gpu_texture_upload(device, rtao_voxel_mask_texture,
+                                           scene.rtao_voxel_mask.ptr, rtao_mask_size,
+                                           (uint32_t)rtao_mask_ext))
+                {
+                    SDL_ReleaseGPUTexture(device, rtao_voxel_mask_texture);
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                vxray_instance.rtao_voxel_mask_texture = rtao_voxel_mask_texture;
             }
             {
                 uint32_t const        brick_grid_size = (uint32_t)scene.brick_grid.count;
@@ -1964,7 +2027,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_BindGPUComputeSamplers(rtao_pass, 0, &rtao_depth_binding, 1);
     SDL_GPUTexture* const rtao_storage_textures[] = {
         vxray_instance.gbuffer_normal_texture,
-        vxray_instance.voxel_texture,
+        vxray_instance.rtao_voxel_mask_texture,
     };
     SDL_BindGPUComputeStorageTextures(rtao_pass, 0, rtao_storage_textures,
                                       SDL_arraysize(rtao_storage_textures));
@@ -2121,6 +2184,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.voxel_texture);
         vxray_instance.voxel_texture = 0;
+    }
+
+    if (vxray_instance.rtao_voxel_mask_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_voxel_mask_texture);
+        vxray_instance.rtao_voxel_mask_texture = 0;
     }
 
     if (vxray_instance.entry_depth_texture)
