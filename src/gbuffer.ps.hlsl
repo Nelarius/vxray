@@ -11,14 +11,14 @@ struct ps_input
 
 ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
-Texture2D<uint>        entry_bricks : register(t0, space2);
-Texture3D<uint>        voxels : register(t1, space2);
-Texture3D<uint>        bricks : register(t2, space2);
+Texture2D<uint>        brick_coord_tex : register(t0, space2);
+Texture3D<uint>        voxel_tex : register(t1, space2);
+Texture3D<uint>        brick_tex : register(t2, space2);
 StructuredBuffer<uint> palette_rgba : register(t3, space2);
 
-uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
+uint voxel_at(int16_t3 const p) { return voxel_tex.Load(int4(p, 0)).r; }
 
-uint brick_at(int16_t3 const p) { return bricks.Load(int4(p, 0)).r; }
+uint brick_at(int16_t3 const p) { return brick_tex.Load(int4(p, 0)).r; }
 
 uint pack_voxel_cell(int16_t3 const cell)
 {
@@ -180,7 +180,7 @@ ps_output main(ps_input const input)
     uint       entry_brick_record = 0u;
     if (!camera_inside)
     {
-        entry_brick_record = entry_bricks.Load(int3(input.position.xy, 0)).r;
+        entry_brick_record = brick_coord_tex.Load(int3(input.position.xy, 0)).r;
         if (entry_brick_record == 0u)
         {
             return miss();
