@@ -25,9 +25,6 @@ add_executable(shader-compiler ${CMAKE_CURRENT_SOURCE_DIR}/src/shader_compiler.c
 target_link_libraries(shader-compiler PRIVATE SDL3::SDL3-static SDL3_shadercross::SDL3_shadercross)
 
 set(VXRAY_SHADER_SOURCES
-        brick_quad.cs.hlsl
-        brick_quad.ps.hlsl
-        brick_quad.vs.hlsl
         display.ps.hlsl
         fullscreen.vs.hlsl
         gbuffer.ps.hlsl
@@ -50,7 +47,6 @@ add_custom_command(
         COMMENT "Compiling HLSL shaders..."
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         DEPENDS ${VXRAY_SHADER_SOURCES}
-                ${CMAKE_CURRENT_SOURCE_DIR}/src/brick_quad.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/constants.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/display.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/gbuffer.h
@@ -81,10 +77,6 @@ set(VXRAY_SOURCES
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.h>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.c>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
-        brick_quad.cs.hlsl
-        brick_quad.h
-        brick_quad.ps.hlsl
-        brick_quad.vs.hlsl
         constants.h
         integrations/cvox.cc
         integrations/cvox.h

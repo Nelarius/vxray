@@ -10,7 +10,7 @@ struct ps_input
 
 Texture2D<float>         depth_tex : register(t0, space2);
 Texture2D<uint>          normal_tex : register(t1, space2);
-Texture3D<uint>          voxel_mask_tex : register(t2, space2);
+Texture3D<uint2>         voxel_masks : register(t2, space2);
 RWStructuredBuffer<uint> hash_checksums : register(u3, space2);
 RWStructuredBuffer<uint> hash_payloads : register(u4, space2);
 RWStructuredBuffer<uint> hash_frames : register(u5, space2);
@@ -64,51 +64,82 @@ float3 orient_sample_direction(float3 const v, float3 const n)
     return float3(v.x, v.y, v.z * n.z);
 }
 
-int mask_bit_index(int16_t3 const cell, int const ext)
+// NOTE: ext is expected to be a power of two
+int mask_linear_idx(int16_t3 const coord, int const ext)
 {
-    int x = cell.x & (ext - 1);
-    int y = cell.y & (ext - 1);
-    int z = cell.z & (ext - 1);
+    int const x = coord.x & (ext - 1);
+    int const y = coord.y & (ext - 1);
+    int const z = coord.z & (ext - 1);
     return x + y * ext + z * ext * ext;
 }
 
-bool dda(float3 const pos, float3 const dir, float const t_max)
+bool mask_bit_test(uint2 const mask, int const index)
 {
-    float3 const inv_dir = 1.0 / dir;
-    float3 const delta_dist = abs(inv_dir);
+    uint const word = mask[index >> 5u];
+    uint const bit = 1u << (index & 31u);
+    return (word & bit) != 0;
+}
 
-    float3 const grid_pos = floor(pos);
-    float3 const ray_sign = sign(dir);
-    float3 const next_pos = grid_pos + max(ray_sign, (float3)0.0);
-    float3       side_dist = (next_pos - pos) * ray_sign * delta_dist;
-    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
-    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
-    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
+bool sparse_ray_march(float3 const ray_origin, float3 const ray_dir, float const t_max)
+{
+    float3 const inv_dir = 1.0 / ray_dir;
+    int16_t3     ipos = int16_t3(floor(ray_origin));
+    float3       local_pos = ray_origin - float3(ipos);
+    float        distance = 0.0;
 
-    min16int3 const step_sign = min16int3(ray_sign);
-    min16int3       voxel = min16int3(grid_pos);
-    for (;;)
+    for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
     {
-        if (any((min16uint3)voxel >= (min16uint)uniforms.grid_ext))
+        if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
         {
             return false;
         }
-        float const t = min(side_dist.x, min(side_dist.y, side_dist.z));
-        if (t > t_max)
-        {
-            return false;
-        }
-        uint const mask = voxel_mask_tex.Load(int4((int3)voxel / VX_MASK_EXT, 0)).r;
-        uint const idx = mask_bit_index(voxel, VX_MASK_EXT);
-        uint const bit = 1u << (idx & 31u);
-        if ((mask & bit) != 0)
+
+        int const   mask_idx = mask_linear_idx(ipos, 4);
+        uint2 const mask = voxel_masks.Load(int4(ipos >> 2, 0)).rg;
+        if (mask_bit_test(mask, mask_idx))
         {
             return true;
         }
-        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
-        side_dist += axis_mask * delta_dist;
-        voxel += min16int3(axis_mask) * step_sign;
+
+        int16_t lod;
+        if ((mask.x | mask.y) == 0u)
+        {
+            lod = 4;
+        }
+        else
+        {
+            uint const mask_part = mask_idx < 32 ? mask.x : mask.y;
+            // 0x0A preserves the high bits of the 2x2x2 block's local x and y coordinates.
+            // 0x00330033 selects the relevant 2x2x2 bits.
+            lod = ((mask_part >> (mask_idx & 0x0A)) & 0x00330033u) == 0u ? 2 : 1;
+        }
+
+        int16_t const  cell_mask = lod - 1;
+        int16_t3 const cell_min = ipos & ~cell_mask;
+        int16_t3 const cell_max = cell_min + lod;
+        float3 const   exit_plane = float3(ray_dir.x < 0.0 ? cell_min.x : cell_max.x,
+                                           ray_dir.y < 0.0 ? cell_min.y : cell_max.y,
+                                           ray_dir.z < 0.0 ? cell_min.z : cell_max.z);
+
+        float3 side_dist = (exit_plane - float3(ipos) - local_pos) * inv_dir;
+        side_dist.x = ray_dir.x == 0.0 ? 3e+38 : side_dist.x;
+        side_dist.y = ray_dir.y == 0.0 ? 3e+38 : side_dist.y;
+        side_dist.z = ray_dir.z == 0.0 ? 3e+38 : side_dist.z;
+        float const t = min(side_dist.x, min(side_dist.y, side_dist.z));
+        distance += t;
+        if (distance > t_max)
+        {
+            return false;
+        }
+
+        float3 const   crossed = step(side_dist, t);
+        float3 const   advanced = local_pos + t * ray_dir;
+        int16_t3 const cell_delta = int16_t3(floor(advanced + crossed * sign(ray_dir) * 0.5));
+        ipos += cell_delta;
+        local_pos = advanced - float3(cell_delta);
     }
+
+    return false;
 }
 
 uint spatial_hash_find_or_insert(spatial_hash_key const key)
@@ -185,7 +216,7 @@ float main(ps_input const input) : SV_Target0
         float2 const u = frac(pixel_noise + r2_sequence((float)i));
         float3 const direction =
             orient_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
-        if (dda(pos, direction, uniforms.rtao_radius))
+        if (sparse_ray_march(pos, direction, uniforms.rtao_radius))
         {
             ++occlusion_count;
         }

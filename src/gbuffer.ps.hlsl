@@ -11,14 +11,12 @@ struct ps_input
 
 ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
-Texture2D<uint>        brick_coord_tex : register(t0, space2);
-Texture3D<uint>        voxel_tex : register(t1, space2);
-Texture3D<uint>        brick_tex : register(t2, space2);
+Texture3D<uint>        voxels : register(t0, space2);
+Texture3D<uint2>       voxel_masks : register(t1, space2);
+Texture3D<uint2>       brick_masks : register(t2, space2);
 StructuredBuffer<uint> palette_rgba : register(t3, space2);
 
-uint voxel_at(int16_t3 const p) { return voxel_tex.Load(int4(p, 0)).r; }
-
-uint brick_at(int16_t3 const p) { return brick_tex.Load(int4(p, 0)).r; }
+uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
 uint pack_voxel_cell(int16_t3 const cell)
 {
@@ -31,106 +29,126 @@ int16_t3 unpack_voxel_cell(uint const packed)
     return int16_t3(packed & 1023u, (packed >> 10u) & 1023u, (packed >> 20u) & 1023u);
 }
 
-int16_t3 unpack_brick_cell(uint const packed)
+bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
+                  float3 const p1, out float tmin, out float tmax)
 {
-    return int16_t3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u);
-}
+    // "RAY AXIS-ALIGNED BOUNDING BOX INTERSECTION", Ray Tracing Gems II
 
-bool camera_is_inside_occupied_brick()
-{
-    float const  ext = (float)uniforms.grid_ext;
-    float3 const camera_position = uniforms.camera_pos.xyz;
-    if (any(camera_position < (float3)0.0) || any(camera_position >= (float3)ext))
-    {
-        return false;
-    }
-
-    int16_t3 const camera_brick = int16_t3(camera_position / (float)VX_BRICK_EXT);
-    return brick_at(camera_brick) > 0u;
-}
-
-float aabb_entry_distance(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
-                          float3 const p1)
-{
-    float3 const t0 = (p0 - ray_origin) * inv_ray_dir;
+    float3 const t0 = (p0 - ray_origin) * inv_ray_dir; // inf is okay here
     float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
     float3 const lo = min(t0, t1);
-    return max(max(lo.x, lo.y), max(lo.z, 0.0));
+    float3 const hi = max(t0, t1);
+    tmin = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    tmax = min(min(hi.x, hi.y), hi.z);
+    return tmin <= tmax;
 }
 
-uint trace_brick(float3 const origin, float3 const dir, float3 const inv_dir,
-                 float3 const delta_dist, int16_t3 const brick_cell)
+// NOTE: ext is expected to be a power of two
+int mask_linear_idx(int16_t3 const coord, int const ext)
 {
-    int16_t3 const brick_min = brick_cell * (int16_t)VX_BRICK_EXT;
-    float const    t = aabb_entry_distance(origin, inv_dir, float3(brick_min),
-                                           float3(brick_min + (int16_t3)VX_BRICK_EXT));
-    float3 const   local_pos = origin + t * dir - float3(brick_min);
-    int16_t3     local_cell = clamp(int16_t3(local_pos), (int16_t3)0, (int16_t3)(VX_BRICK_EXT - 1));
-    float3 const ray_sign = sign(dir);
-    float3 const next_pos = float3(local_cell) + max(ray_sign, (float3)0.0);
-    float3       side_dist = (next_pos - local_pos) * inv_dir;
-    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
-    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
-    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
+    int const x = coord.x & (ext - 1);
+    int const y = coord.y & (ext - 1);
+    int const z = coord.z & (ext - 1);
+    return x + y * ext + z * ext * ext;
+}
 
-    int16_t3 const step_sign = int16_t3(ray_sign);
-    for (;;)
+bool mask_bit_test(uint2 const mask, int const index)
+{
+    uint const word = mask[index >> 5u];
+    uint const bit = 1u << (index & 31u);
+    return (word & bit) != 0;
+}
+
+uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
+{
+    float3 const inv_dir = 1.0 / ray_dir;
+    float const  grid_ext = (float)uniforms.grid_ext;
+    float        tmin, tmax;
+    if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)grid_ext, tmin, tmax))
     {
-        if (any((uint16_t3)local_cell >= (uint16_t)VX_BRICK_EXT))
-        {
-            return VX_NO_CELL;
-        }
-
-        int16_t3 const cell = brick_min + local_cell;
-        if (voxel_at(cell) > 0u)
-        {
-            return pack_voxel_cell(cell);
-        }
-
-        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
-        side_dist += axis_mask * delta_dist;
-        local_cell += int16_t3(axis_mask) * step_sign;
+        return VX_NO_CELL;
     }
-}
 
-uint multilevel_dda(float3 const origin, float3 const dir, int16_t3 brick_cell)
-{
-    // Good insight into DDA: https://news.ycombinator.com/item?id=43599990
+    bool const   camera_inside = all(ray_origin >= (float3)0.0) && all(ray_origin < grid_ext);
+    float3 const start =
+        camera_inside ? ray_origin : offset_ray(ray_origin + tmin * ray_dir, ray_dir);
+    int16_t3 ipos = int16_t3(floor(start));
+    float3   local_pos = start - float3(ipos);
 
-    float3 const inv_dir = 1.0 / dir;
-    float3 const delta_dist = abs(inv_dir);
-
-    float3 const ray_sign = sign(dir);
-    float3 const next_pos = (float3(brick_cell) + max(ray_sign, (float3)0.0)) * VX_BRICK_EXT;
-    float3       side_dist = (next_pos - origin) * inv_dir / (float)VX_BRICK_EXT;
-    side_dist.x = ray_sign.x == 0.0 ? 3e+38 : side_dist.x;
-    side_dist.y = ray_sign.y == 0.0 ? 3e+38 : side_dist.y;
-    side_dist.z = ray_sign.z == 0.0 ? 3e+38 : side_dist.z;
-
-    int16_t3 const step_sign = int16_t3(ray_sign);
-    int16_t const  brick_grid_ext = (int16_t)uniforms.grid_ext / (int16_t)VX_BRICK_EXT;
-    for (;;)
+    for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
     {
-        if (any((uint16_t3)brick_cell >= (uint16_t)brick_grid_ext))
+        if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
         {
             return VX_NO_CELL;
         }
 
-        if (brick_at(brick_cell) > 0u)
+        // Determine occupancy level to use
+
+        int     mask_idx = mask_linear_idx(ipos >> 3, 4);
+        uint2   mask = brick_masks.Load(int4(ipos >> 5, 0)).rg;
+        int16_t scale = (int16_t)VX_BRICK_EXT;
+
+        if (mask_bit_test(mask, mask_idx))
         {
-            uint const packed_cell = trace_brick(origin, dir, inv_dir, delta_dist, brick_cell);
-            if (packed_cell != VX_NO_CELL)
+            mask_idx = mask_linear_idx(ipos, 4);
+            mask = voxel_masks.Load(int4(ipos >> 2, 0)).rg;
+            scale = 1;
+
+            if (mask_bit_test(mask, mask_idx))
             {
-                return packed_cell;
+                return pack_voxel_cell(ipos);
             }
         }
 
-        // Branchless trick: https://www.shadertoy.com/view/4dX3zl
-        float3 const axis_mask = step(side_dist, min(side_dist.yzx, side_dist.zxy));
-        side_dist += axis_mask * delta_dist;
-        brick_cell += int16_t3(axis_mask) * step_sign;
+        // Determine largest empty region containing `ipos`
+
+        int16_t lod;
+
+        if ((mask.x | mask.y) == 0u)
+        {
+            // Entire 4x4x4 region is empty
+            lod = 4;
+        }
+        else
+        {
+            uint const mask_part = mask_idx < 32 ? mask.x : mask.y;
+            // Is the containing 2x2x2 region empty?
+            // 0x0A preserves the high bits of the 2x2x2 block's local x and y coordinates.
+            // 0x00330033 selects the relevant 2x2x2 bits.
+            if (((mask_part >> (mask_idx & 0x0A)) & 0x00330033u) == 0)
+            {
+                lod = 2;
+            }
+            else
+            {
+                lod = 1;
+            }
+        }
+
+        lod *= scale;
+
+        // Intersect the ray with the forward-facing planes of the empty region
+        int16_t const  cell_mask = lod - 1;
+        int16_t3 const cell_min = ipos & ~cell_mask;
+        int16_t3 const cell_max = cell_min + lod;
+        float3 const   exit_plane = float3(ray_dir.x < 0.0 ? cell_min.x : cell_max.x,
+                                           ray_dir.y < 0.0 ? cell_min.y : cell_max.y,
+                                           ray_dir.z < 0.0 ? cell_min.z : cell_max.z);
+
+        float3 side_dist = (exit_plane - float3(ipos) - local_pos) * inv_dir;
+        side_dist.x = ray_dir.x == 0.0 ? 3e+38 : side_dist.x;
+        side_dist.y = ray_dir.y == 0.0 ? 3e+38 : side_dist.y;
+        side_dist.z = ray_dir.z == 0.0 ? 3e+38 : side_dist.z;
+        float const  t = min(side_dist.x, min(side_dist.y, side_dist.z));
+        float3 const crossed = step(side_dist, t);
+
+        float3 const   advanced = local_pos + t * ray_dir;
+        int16_t3 const cell_delta = int16_t3(floor(advanced + crossed * sign(ray_dir) * 0.5));
+        ipos += cell_delta;
+        local_pos = advanced - float3(cell_delta);
     }
+
+    return VX_NO_CELL;
 }
 
 struct voxel_intersection
@@ -176,26 +194,11 @@ ps_output miss()
 
 ps_output main(ps_input const input)
 {
-    bool const camera_inside = camera_is_inside_occupied_brick();
-    uint       entry_brick_record = 0u;
-    if (!camera_inside)
-    {
-        entry_brick_record = brick_coord_tex.Load(int3(input.position.xy, 0)).r;
-        if (entry_brick_record == 0u)
-        {
-            return miss();
-        }
-    }
-
     float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 const dir =
         normalize(unproject(uniforms.inverse_view_projection, ndc, 1.0) - uniforms.camera_pos.xyz);
-    float3 const trace_origin =
-        camera_inside ? offset_ray(uniforms.camera_pos.xyz, dir) : uniforms.camera_pos.xyz;
-    int16_t3 const first_brick = camera_inside ? int16_t3(trace_origin / (float)VX_BRICK_EXT)
-                                               : unpack_brick_cell(entry_brick_record - 1u);
 
-    uint const packed_cell = multilevel_dda(trace_origin, dir, first_brick);
+    uint const packed_cell = sparse_ray_march(uniforms.camera_pos.xyz, dir);
     if (packed_cell == VX_NO_CELL)
     {
         return miss();
