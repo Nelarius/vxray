@@ -10,10 +10,11 @@ struct ps_input
 
 Texture2D<float>         depth_tex : register(t0, space2);
 Texture2D<uint>          normal_tex : register(t1, space2);
-Texture3D<uint2>         voxel_masks : register(t2, space2);
-RWStructuredBuffer<uint> hash_checksums : register(u3, space2);
-RWStructuredBuffer<uint> hash_payloads : register(u4, space2);
-RWStructuredBuffer<uint> hash_frames : register(u5, space2);
+Texture3D<uint>          voxel_masks : register(t2, space2);
+Texture3D<uint>          voxel_aadf : register(t3, space2);
+RWStructuredBuffer<uint> hash_checksums : register(u4, space2);
+RWStructuredBuffer<uint> hash_payloads : register(u5, space2);
+RWStructuredBuffer<uint> hash_frames : register(u6, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 
@@ -35,10 +36,12 @@ uint2 pcg2d(uint2 v)
 
 // Converts an unsigned integer into a float in the range [0, 1) by using the 23 most significant
 // bits as the mantissa.
-float2 as_normalized_float(uint2 x) { return asfloat(0x3f800000u | (x >> 9u)) - 1.0f; }
+float2 as_normalized_float(uint2 x) { return asfloat(0x3F800000u | (x >> 9u)) - 1.0f; }
 
 float2 r2_sequence(float const n)
 {
+    // 2-dimensional golden ratio additive recurrence sequence
+    // https://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
     float const a1 = 0.7548777f;
     float const a2 = 0.5698403f;
     return frac(float2(n * a1, n * a2));
@@ -64,25 +67,15 @@ float3 orient_sample_direction(float3 const v, float3 const n)
     return float3(v.x, v.y, v.z * n.z);
 }
 
-// NOTE: ext is expected to be a power of two
-int mask_linear_idx(int16_t3 const coord, int const ext)
+uint mask_linear_idx(int16_t3 const coord)
 {
-    int const x = coord.x & (ext - 1);
-    int const y = coord.y & (ext - 1);
-    int const z = coord.z & (ext - 1);
-    return x + y * ext + z * ext * ext;
-}
-
-bool mask_bit_test(uint2 const mask, int const index)
-{
-    uint const word = mask[index >> 5u];
-    uint const bit = 1u << (index & 31u);
-    return (word & bit) != 0;
+    int16_t3 const local = coord & (VX_MASK_EXT - 1);
+    return local.x + local.y * VX_MASK_EXT + local.z * VX_MASK_EXT * VX_MASK_EXT;
 }
 
 bool sparse_ray_march(float3 const ray_origin, float3 const ray_dir, float const t_max)
 {
-    float3 const inv_dir = 1.0 / ray_dir;
+    float3 const inv_dir = 1.0 / (ray_dir + (float3)(ray_dir == 0.0) * 1e-30);
     int16_t3     ipos = int16_t3(floor(ray_origin));
     float3       local_pos = ray_origin - float3(ipos);
     float        distance = 0.0;
@@ -94,32 +87,28 @@ bool sparse_ray_march(float3 const ray_origin, float3 const ray_dir, float const
             return false;
         }
 
-        int const   mask_idx = mask_linear_idx(ipos, 4);
-        uint2 const mask = voxel_masks.Load(int4(ipos >> 2, 0)).rg;
-        if (mask_bit_test(mask, mask_idx))
         {
-            return true;
+            uint const mask = voxel_masks.Load(int4(ipos / VX_MASK_EXT, 0)).r;
+            uint const idx = mask_linear_idx(ipos);
+            if ((mask & (1u << idx)) != 0u)
+            {
+                return true;
+            }
         }
 
-        int16_t lod;
-        if ((mask.x | mask.y) == 0u)
-        {
-            lod = 4;
-        }
-        else
-        {
-            uint const mask_part = mask_idx < 32 ? mask.x : mask.y;
-            // 0x0A preserves the high bits of the 2x2x2 block's local x and y coordinates.
-            // 0x00330033 selects the relevant 2x2x2 bits.
-            lod = ((mask_part >> (mask_idx & 0x0A)) & 0x00330033u) == 0u ? 2 : 1;
-        }
+        uint const     aadf = voxel_aadf.Load(int4(ipos, 0)).r;
+        uint const     shift_x = ray_dir.x < 0.0 ? 0u : 5u;
+        uint const     shift_y = ray_dir.y < 0.0 ? 10u : 15u;
+        uint const     shift_z = ray_dir.z < 0.0 ? 20u : 25u;
+        int16_t3 const bounds =
+            int16_t3((aadf >> shift_x) & 31u, (aadf >> shift_y) & 31u, (aadf >> shift_z) & 31u);
 
-        int16_t const  cell_mask = lod - 1;
-        int16_t3 const cell_min = ipos & ~cell_mask;
-        int16_t3 const cell_max = cell_min + lod;
-        float3 const   exit_plane = float3(ray_dir.x < 0.0 ? cell_min.x : cell_max.x,
-                                           ray_dir.y < 0.0 ? cell_min.y : cell_max.y,
-                                           ray_dir.z < 0.0 ? cell_min.z : cell_max.z);
+        int16_t3 const cell_min = max(ipos - int16_t3(bounds), (int16_t3)0);
+        int16_t3 const cell_max =
+            min(ipos + 1 + int16_t3(bounds), (int16_t3)(int16_t)uniforms.grid_ext);
+        float3 const exit_plane = float3(ray_dir.x < 0.0 ? cell_min.x : cell_max.x,
+                                         ray_dir.y < 0.0 ? cell_min.y : cell_max.y,
+                                         ray_dir.z < 0.0 ? cell_min.z : cell_max.z);
 
         float3 side_dist = (exit_plane - float3(ipos) - local_pos) * inv_dir;
         side_dist.x = ray_dir.x == 0.0 ? 3e+38 : side_dist.x;

@@ -25,6 +25,8 @@ add_executable(shader-compiler ${CMAKE_CURRENT_SOURCE_DIR}/src/shader_compiler.c
 target_link_libraries(shader-compiler PRIVATE SDL3::SDL3-static SDL3_shadercross::SDL3_shadercross)
 
 set(VXRAY_SHADER_SOURCES
+        aadf_global.cs.hlsl
+        aadf_local.cs.hlsl
         display.ps.hlsl
         fullscreen.vs.hlsl
         gbuffer.ps.hlsl
@@ -78,6 +80,8 @@ set(VXRAY_SOURCES
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.c>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
         constants.h
+        aadf_global.cs.hlsl
+        aadf_local.cs.hlsl
         integrations/cvox.cc
         integrations/cvox.h
         display.h

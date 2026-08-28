@@ -5,14 +5,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-extern uint8_t const BRICK_QUAD_CS_BYTES[];
-extern size_t const BRICK_QUAD_CS_SIZE;
+extern uint8_t const AADF_GLOBAL_CS_BYTES[];
+extern size_t const AADF_GLOBAL_CS_SIZE;
 
-extern uint8_t const BRICK_QUAD_PS_BYTES[];
-extern size_t const BRICK_QUAD_PS_SIZE;
-
-extern uint8_t const BRICK_QUAD_VS_BYTES[];
-extern size_t const BRICK_QUAD_VS_SIZE;
+extern uint8_t const AADF_LOCAL_CS_BYTES[];
+extern size_t const AADF_LOCAL_CS_SIZE;
 
 extern uint8_t const DISPLAY_PS_BYTES[];
 extern size_t const DISPLAY_PS_SIZE;

@@ -42,6 +42,16 @@ static_assert(sizeof(display_uniforms) == 32, "display uniform layout must match
 static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
 static_assert(sizeof(rtao_uniforms) == 128, "RTAO uniform layout must match HLSL");
 
+typedef struct vx_aadf_uniforms
+{
+    uint32_t grid_ext;
+    uint32_t axis;
+    uint32_t initialize;
+    uint32_t padding;
+} vx_aadf_uniforms;
+
+static_assert(sizeof(vx_aadf_uniforms) == 16, "AADF uniform layout must match HLSL");
+
 #ifdef NDEBUG
 #define GPU_DEVICE_DEBUG_MODE false
 #else
@@ -85,7 +95,6 @@ static_assert(sizeof(rtao_uniforms) == 128, "RTAO uniform layout must match HLSL
 #define vx_buffer_free(b) free((b).ptr)
 
 vx_buffer_decl(uint8_t);
-vx_buffer_decl(uint32_t);
 
 static uint32_t vx_next_power_of_2(uint32_t x)
 {
@@ -135,44 +144,45 @@ static int vx_round_to_int(float const val)
     return (int)(val >= 0.f ? (val + 0.5f) : (val - 0.5f));
 }
 
-static int vx_grid_index(int const x, int const y, int const z, int const grid_ext)
+static int vx_grid_index(int16_t const x, int16_t const y, int16_t const z, int const grid_ext)
 {
     return x + (y * grid_ext) + (z * grid_ext * grid_ext);
 }
 
-// Builds 4x4x4 occupancy masks for a dense grid. Each mask texel contains 64 bits in its
-// R32G32_UINT channels, with x varying fastest, then y, then z.
+// Builds 2x2x2 occupancy masks for a dense grid. Each mask texel contains 8 bits in R8_UINT, with
+// x varying fastest, then y, then z.
 static bool vx_create_occupancy_masks(vx_buffer(uint8_t) const occupancy_grid,
-                                      int const                   occupancy_grid_ext,
-                                      vx_buffer(uint32_t) * const out_masks)
+                                      int const                  occupancy_grid_ext,
+                                      vx_buffer(uint8_t) * const out_masks)
 {
     assert(occupancy_grid.ptr);
     assert(occupancy_grid_ext > 0);
     assert(out_masks);
 
-    int const mask_grid_ext = (occupancy_grid_ext + 3) / 4;
+    int const mask_grid_ext = (occupancy_grid_ext + VX_MASK_EXT - 1) / VX_MASK_EXT;
     int const mask_count = mask_grid_ext * mask_grid_ext * mask_grid_ext;
-    vx_buffer(uint32_t) masks = vx_buffer_calloc(uint32_t, 2 * mask_count);
+    vx_buffer(uint8_t) masks = vx_buffer_calloc(uint8_t, mask_count);
     if (!masks.ptr)
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate occupancy masks");
         return false;
     }
 
-    for (int z = 0; z < occupancy_grid_ext; ++z)
+    for (int16_t z = 0; z < occupancy_grid_ext; ++z)
     {
-        for (int y = 0; y < occupancy_grid_ext; ++y)
+        for (int16_t y = 0; y < occupancy_grid_ext; ++y)
         {
-            for (int x = 0; x < occupancy_grid_ext; ++x)
+            for (int16_t x = 0; x < occupancy_grid_ext; ++x)
             {
                 if (occupancy_grid.ptr[vx_grid_index(x, y, z, occupancy_grid_ext)] == 0u)
                 {
                     continue;
                 }
 
-                int const mask_index = vx_grid_index(x >> 2, y >> 2, z >> 2, mask_grid_ext);
-                int const bit_index = (x & 3) | ((y & 3) << 2) | ((z & 3) << 4);
-                masks.ptr[2 * mask_index + (bit_index >> 5)] |= (uint32_t)1u << (bit_index & 31);
+                int const mask_index =
+                    vx_grid_index(x / VX_MASK_EXT, y / VX_MASK_EXT, z / VX_MASK_EXT, mask_grid_ext);
+                int const bit_index = (x & 1) | ((y & 1) << 1) | ((z & 1) << 2);
+                masks.ptr[mask_index] |= (uint8_t)(1u << bit_index);
             }
         }
     }
@@ -181,20 +191,60 @@ static bool vx_create_occupancy_masks(vx_buffer(uint8_t) const occupancy_grid,
     return true;
 }
 
+static bool vx_create_coarse_occupancy_grid(vx_buffer(uint8_t) const occupancy_grid,
+                                            int const occupancy_grid_ext, int const cell_ext,
+                                            vx_buffer(uint8_t) * const out_grid)
+{
+    assert(occupancy_grid.ptr);
+    assert(occupancy_grid_ext > 0);
+    assert(cell_ext > 0);
+    assert(out_grid);
+
+    int const coarse_grid_ext = (occupancy_grid_ext + cell_ext - 1) / cell_ext;
+    int const coarse_count = coarse_grid_ext * coarse_grid_ext * coarse_grid_ext;
+    vx_buffer(uint8_t) coarse_grid = vx_buffer_calloc(uint8_t, coarse_count);
+    if (!coarse_grid.ptr)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to allocate coarse occupancy grid");
+        return false;
+    }
+
+    for (int16_t z = 0; z < occupancy_grid_ext; ++z)
+    {
+        for (int16_t y = 0; y < occupancy_grid_ext; ++y)
+        {
+            for (int16_t x = 0; x < occupancy_grid_ext; ++x)
+            {
+                if (occupancy_grid.ptr[vx_grid_index(x, y, z, occupancy_grid_ext)] != 0u)
+                {
+                    int const index =
+                        vx_grid_index(x / cell_ext, y / cell_ext, z / cell_ext, coarse_grid_ext);
+                    coarse_grid.ptr[index] = 1u;
+                }
+            }
+        }
+    }
+
+    *out_grid = coarse_grid;
+    return true;
+}
+
 typedef struct vx_scene
 {
     vx_buffer(uint8_t) voxel_grid;
     vx_buffer(uint8_t) brick_grid;
-    vx_buffer(uint32_t) voxel_masks;
-    vx_buffer(uint32_t) brick_masks;
+    vx_buffer(uint8_t) chunk_grid;
+    vx_buffer(uint8_t) voxel_masks;
+    vx_buffer(uint8_t) brick_masks;
+    vx_buffer(uint8_t) chunk_masks;
     uint  palette[256];
     int   grid_ext;
     int   brick_grid_ext;
+    int   chunk_grid_ext;
     vec3s center;
 } vx_scene;
 
-// Loads a MagicaVoxel scene into dense voxel and brick grids and sparse occupancy masks. Free all
-// grids with `vx_buffer_free`.
+// Loads a MagicaVoxel scene into dense voxel, brick, and chunk grids and occupancy masks.
 static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 {
     assert(vox_path);
@@ -202,8 +252,10 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
 
     vx_buffer(uint8_t) voxel_grid = {0};
     vx_buffer(uint8_t) brick_grid = {0};
-    vx_buffer(uint32_t) voxel_masks = {0};
-    vx_buffer(uint32_t) brick_masks = {0};
+    vx_buffer(uint8_t) chunk_grid = {0};
+    vx_buffer(uint8_t) voxel_masks = {0};
+    vx_buffer(uint8_t) brick_masks = {0};
+    vx_buffer(uint8_t) chunk_masks = {0};
     cvox_scene const* scene = 0;
     {
         size_t   num_bytes;
@@ -292,7 +344,8 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
         assert(scene_ext_y > 0);
         assert(scene_ext_z > 0);
         int const largest_extent = SDL_max(scene_ext_x, SDL_max(scene_ext_y, scene_ext_z));
-        if (largest_extent > 1024) // NOTE: 1024^ 3 is (1 << 30)
+        assert(largest_extent <= 1024);
+        if (largest_extent > 1024)
         {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Scene extent is too large: %d",
                          largest_extent);
@@ -338,11 +391,11 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             int3 const pivot = {.x = (int)(model->size_x / 2),
                                 .y = (int)(model->size_y / 2),
                                 .z = (int)(model->size_z / 2)};
-            for (int z = 0; z < sz; ++z)
+            for (int16_t z = 0; z < sz; ++z)
             {
-                for (int y = 0; y < sy; ++y)
+                for (int16_t y = 0; y < sy; ++y)
                 {
-                    for (int x = 0; x < sx; ++x)
+                    for (int16_t x = 0; x < sx; ++x)
                     {
                         int const     src_idx = x + y * sx + z * sx * sy;
                         uint8_t const voxel = model->voxel_data[src_idx];
@@ -356,21 +409,24 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
                             int const gx = vx_round_to_int(global_coord.x);
                             int const gy = vx_round_to_int(global_coord.y);
                             int const gz = vx_round_to_int(global_coord.z);
-                            int const dx = gx - scene_min.x;
-                            int const dy = gy - scene_min.y;
-                            int const dz = gz - scene_min.z;
-                            assert(dx >= 0 && dx < grid_ext);
-                            assert(dy >= 0 && dy < grid_ext);
-                            assert(dz >= 0 && dz < grid_ext);
+                            int const raw_dx = gx - scene_min.x;
+                            int const raw_dy = gy - scene_min.y;
+                            int const raw_dz = gz - scene_min.z;
+                            assert(raw_dx >= 0 && raw_dx < grid_ext);
+                            assert(raw_dy >= 0 && raw_dy < grid_ext);
+                            assert(raw_dz >= 0 && raw_dz < grid_ext);
+                            int16_t const dx = (int16_t)raw_dx;
+                            int16_t const dy = (int16_t)raw_dy;
+                            int16_t const dz = (int16_t)raw_dz;
 
                             int const dest_idx = dx + dy * grid_ext + dz * grid_ext * grid_ext;
                             assert(dest_idx >= 0 && dest_idx < voxel_grid.count);
                             voxel_grid.ptr[dest_idx] = voxel;
 
-                            int const brick_x = dx / VX_BRICK_EXT;
-                            int const brick_y = dy / VX_BRICK_EXT;
-                            int const brick_z = dz / VX_BRICK_EXT;
-                            int const brick_idx =
+                            int16_t const brick_x = (int16_t)(dx / VX_BRICK_EXT);
+                            int16_t const brick_y = (int16_t)(dy / VX_BRICK_EXT);
+                            int16_t const brick_z = (int16_t)(dz / VX_BRICK_EXT);
+                            int const     brick_idx =
                                 vx_grid_index(brick_x, brick_y, brick_z, brick_grid_ext);
                             assert(brick_idx >= 0 && brick_idx < brick_grid.count);
                             brick_grid.ptr[brick_idx] = 1;
@@ -380,22 +436,29 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
             }
         }
 
-        if (!vx_create_occupancy_masks(voxel_grid, grid_ext, &voxel_masks) ||
-            !vx_create_occupancy_masks(brick_grid, brick_grid_ext, &brick_masks))
+        int const chunk_grid_ext = (brick_grid_ext + VX_CHUNK_EXT - 1) / VX_CHUNK_EXT;
+        if (!vx_create_coarse_occupancy_grid(brick_grid, brick_grid_ext, VX_CHUNK_EXT,
+                                             &chunk_grid) ||
+            !vx_create_occupancy_masks(voxel_grid, grid_ext, &voxel_masks) ||
+            !vx_create_occupancy_masks(brick_grid, brick_grid_ext, &brick_masks) ||
+            !vx_create_occupancy_masks(chunk_grid, chunk_grid_ext, &chunk_masks))
         {
             goto cleanup_grids;
         }
 
         out_scene->grid_ext = grid_ext;
         out_scene->brick_grid_ext = brick_grid_ext;
+        out_scene->chunk_grid_ext = chunk_grid_ext;
         out_scene->center = (vec3s){0.5f * (float)scene_ext_x, 0.5f * (float)scene_ext_y,
                                     0.5f * (float)scene_ext_z};
     }
 
     out_scene->voxel_grid = voxel_grid;
     out_scene->brick_grid = brick_grid;
+    out_scene->chunk_grid = chunk_grid;
     out_scene->voxel_masks = voxel_masks;
     out_scene->brick_masks = brick_masks;
+    out_scene->chunk_masks = chunk_masks;
     for (int i = 0; i < 256; ++i)
     {
         cvox_rgba const color = scene->palette.color[i];
@@ -406,8 +469,10 @@ static bool vx_load_scene(char const* const vox_path, vx_scene* const out_scene)
     return true;
 
 cleanup_grids:
+    vx_buffer_free(chunk_masks);
     vx_buffer_free(brick_masks);
     vx_buffer_free(voxel_masks);
+    vx_buffer_free(chunk_grid);
     vx_buffer_free(brick_grid);
     vx_buffer_free(voxel_grid);
 cleanup_scene:
@@ -419,14 +484,18 @@ cleanup_scene:
 static void vx_scene_free(vx_scene* const scene)
 {
     assert(scene);
+    vx_buffer_free(scene->chunk_grid);
     vx_buffer_free(scene->brick_grid);
     vx_buffer_free(scene->voxel_grid);
+    vx_buffer_free(scene->chunk_masks);
     vx_buffer_free(scene->brick_masks);
     vx_buffer_free(scene->voxel_masks);
+    scene->chunk_grid = (vx_buffer(uint8_t)){0};
     scene->brick_grid = (vx_buffer(uint8_t)){0};
     scene->voxel_grid = (vx_buffer(uint8_t)){0};
-    scene->brick_masks = (vx_buffer(uint32_t)){0};
-    scene->voxel_masks = (vx_buffer(uint32_t)){0};
+    scene->chunk_masks = (vx_buffer(uint8_t)){0};
+    scene->brick_masks = (vx_buffer(uint8_t)){0};
+    scene->voxel_masks = (vx_buffer(uint8_t)){0};
 }
 
 // Resource creation wrappers that attach a debug name, displayed in graphics debuggers, via the
@@ -481,6 +550,19 @@ vx_create_gpu_graphics_pipeline(SDL_GPUDevice* const                    device,
     SDL_GPUGraphicsPipelineCreateInfo named_info = info;
     named_info.props = props;
     SDL_GPUGraphicsPipeline* const pipeline = SDL_CreateGPUGraphicsPipeline(device, &named_info);
+    SDL_DestroyProperties(props);
+    return pipeline;
+}
+
+static SDL_GPUComputePipeline*
+vx_create_gpu_compute_pipeline(SDL_GPUDevice* const                   device,
+                               SDL_GPUComputePipelineCreateInfo const info, char const* const name)
+{
+    SDL_PropertiesID const props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING, name);
+    SDL_GPUComputePipelineCreateInfo named_info = info;
+    named_info.props = props;
+    SDL_GPUComputePipeline* const pipeline = SDL_CreateGPUComputePipeline(device, &named_info);
     SDL_DestroyProperties(props);
     return pipeline;
 }
@@ -605,19 +687,20 @@ static bool vx_gpu_texture_upload(SDL_GPUDevice* const device, SDL_GPUTexture* c
 }
 
 static SDL_GPUTexture* vx_create_occupancy_mask_texture(SDL_GPUDevice* const device,
-                                                        vx_buffer(uint32_t) const masks,
+                                                        vx_buffer(uint8_t) const masks,
                                                         int const         source_grid_ext,
                                                         char const* const name)
 {
-    int const mask_grid_ext = (source_grid_ext + 3) / 4;
+    int const mask_grid_ext = (source_grid_ext + VX_MASK_EXT - 1) / VX_MASK_EXT;
     assert(masks.ptr);
-    assert(masks.count == 2 * mask_grid_ext * mask_grid_ext * mask_grid_ext);
+    assert(masks.count == mask_grid_ext * mask_grid_ext * mask_grid_ext);
 
     SDL_GPUTexture* const texture = vx_create_gpu_texture(
         device,
         (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
-                                   .format = SDL_GPU_TEXTUREFORMAT_R32G32_UINT,
-                                   .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                            SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
                                    .width = (uint32_t)mask_grid_ext,
                                    .height = (uint32_t)mask_grid_ext,
                                    .layer_count_or_depth = (uint32_t)mask_grid_ext,
@@ -639,6 +722,211 @@ static SDL_GPUTexture* vx_create_occupancy_mask_texture(SDL_GPUDevice* const dev
     }
 
     return texture;
+}
+
+static SDL_GPUTexture* vx_create_aadf_texture(SDL_GPUDevice* const device, int const grid_ext,
+                                              char const* const name)
+{
+    assert(grid_ext > 0);
+
+    SDL_GPUTexture* const texture = vx_create_gpu_texture(
+        device,
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                            SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
+                                            SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
+                                   .width = (uint32_t)grid_ext,
+                                   .height = (uint32_t)grid_ext,
+                                   .layer_count_or_depth = (uint32_t)grid_ext,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        name);
+    if (!texture)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create %s texture: %s", name, SDL_GetError());
+        return 0;
+    }
+
+    return texture;
+}
+
+static void vx_dispatch_local_aadf(SDL_GPUCommandBuffer* const   cmd,
+                                   SDL_GPUComputePipeline* const pipeline,
+                                   SDL_GPUTexture* const         occupancy_masks,
+                                   SDL_GPUTexture* const destination, uint32_t const grid_ext)
+{
+    SDL_GPUStorageTextureReadWriteBinding const destination_binding = {
+        .texture = destination, .mip_level = 0, .layer = 0, .cycle = false};
+    SDL_GPUComputePass* const pass = SDL_BeginGPUComputePass(cmd, &destination_binding, 1, 0, 0);
+    assert(pass);
+    SDL_BindGPUComputePipeline(pass, pipeline);
+    SDL_BindGPUComputeStorageTextures(pass, 0, &occupancy_masks, 1);
+    vx_aadf_uniforms const uniforms = {.grid_ext = grid_ext};
+    SDL_PushGPUComputeUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+    uint32_t const group_count = (grid_ext + VX_BRICK_EXT - 1u) / VX_BRICK_EXT;
+    SDL_DispatchGPUCompute(pass, group_count, group_count, group_count);
+    SDL_EndGPUComputePass(pass);
+}
+
+static void vx_dispatch_global_aadf(SDL_GPUCommandBuffer* const   cmd,
+                                    SDL_GPUComputePipeline* const pipeline,
+                                    SDL_GPUTexture* const         occupancy_masks,
+                                    SDL_GPUTexture* const source, SDL_GPUTexture* const destination,
+                                    uint32_t const grid_ext, uint32_t const axis,
+                                    bool const initialize)
+{
+    SDL_GPUStorageTextureReadWriteBinding const destination_binding = {
+        .texture = destination, .mip_level = 0, .layer = 0, .cycle = false};
+    SDL_GPUComputePass* const pass = SDL_BeginGPUComputePass(cmd, &destination_binding, 1, 0, 0);
+    assert(pass);
+    SDL_BindGPUComputePipeline(pass, pipeline);
+    SDL_GPUTexture* const sources[] = {occupancy_masks, source};
+    SDL_BindGPUComputeStorageTextures(pass, 0, sources, SDL_arraysize(sources));
+    vx_aadf_uniforms const uniforms = {
+        .grid_ext = grid_ext, .axis = axis, .initialize = initialize ? 1u : 0u};
+    SDL_PushGPUComputeUniformData(cmd, 0, &uniforms, sizeof(uniforms));
+    uint32_t const group_count = (grid_ext + VX_BRICK_EXT - 1u) / VX_BRICK_EXT;
+    SDL_DispatchGPUCompute(pass, group_count, group_count, group_count);
+    SDL_EndGPUComputePass(pass);
+}
+
+static bool
+vx_create_gpu_aadfs(SDL_GPUDevice* const device, SDL_GPUTexture* const voxel_occupancy_masks,
+                    SDL_GPUTexture* const brick_occupancy_masks,
+                    SDL_GPUTexture* const chunk_occupancy_masks, uint32_t const grid_ext,
+                    uint32_t const brick_grid_ext, uint32_t const chunk_grid_ext,
+                    SDL_GPUTexture** const out_voxel_aadf, SDL_GPUTexture** const out_brick_aadf,
+                    SDL_GPUTexture** const out_chunk_aadf)
+{
+    assert(device);
+    assert(voxel_occupancy_masks);
+    assert(brick_occupancy_masks);
+    assert(chunk_occupancy_masks);
+    assert(grid_ext > 0);
+    assert(brick_grid_ext > 0);
+    assert(chunk_grid_ext > 0);
+    assert(out_voxel_aadf);
+    assert(out_brick_aadf);
+    assert(out_chunk_aadf);
+
+    bool                  success = false;
+    SDL_GPUTexture* const voxel_aadf = vx_create_aadf_texture(device, (int)grid_ext, "voxel-aadf");
+    SDL_GPUTexture* const brick_aadf =
+        vx_create_aadf_texture(device, (int)brick_grid_ext, "brick-aadf");
+    SDL_GPUTexture* const chunk_aadf =
+        vx_create_aadf_texture(device, (int)chunk_grid_ext, "chunk-aadf");
+    SDL_GPUTexture* const chunk_aadf_scratch =
+        vx_create_aadf_texture(device, (int)chunk_grid_ext, "chunk-aadf-scratch");
+    if (!voxel_aadf || !brick_aadf || !chunk_aadf || !chunk_aadf_scratch)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create AADF textures: %s", SDL_GetError());
+        goto cleanup_textures;
+    }
+
+    SDL_GPUComputePipeline* const local_pipeline = vx_create_gpu_compute_pipeline(
+        device,
+        (SDL_GPUComputePipelineCreateInfo){.code_size = AADF_LOCAL_CS_SIZE,
+                                           .code = AADF_LOCAL_CS_BYTES,
+                                           .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                           .format = GPU_SHADER_FORMAT,
+                                           .num_readonly_storage_textures = 1,
+                                           .num_readwrite_storage_textures = 1,
+                                           .num_uniform_buffers = 1,
+                                           .threadcount_x = VX_BRICK_EXT,
+                                           .threadcount_y = VX_BRICK_EXT,
+                                           .threadcount_z = VX_BRICK_EXT},
+        "aadf-local");
+    SDL_GPUComputePipeline* const global_pipeline = vx_create_gpu_compute_pipeline(
+        device,
+        (SDL_GPUComputePipelineCreateInfo){.code_size = AADF_GLOBAL_CS_SIZE,
+                                           .code = AADF_GLOBAL_CS_BYTES,
+                                           .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                           .format = GPU_SHADER_FORMAT,
+                                           .num_readonly_storage_textures = 2,
+                                           .num_readwrite_storage_textures = 1,
+                                           .num_uniform_buffers = 1,
+                                           .threadcount_x = VX_BRICK_EXT,
+                                           .threadcount_y = VX_BRICK_EXT,
+                                           .threadcount_z = VX_BRICK_EXT},
+        "aadf-global");
+    if (!local_pipeline || !global_pipeline)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create AADF pipelines: %s", SDL_GetError());
+        goto cleanup_pipelines;
+    }
+
+    SDL_GPUCommandBuffer* const cmd = SDL_AcquireGPUCommandBuffer(device);
+    if (!cmd)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to acquire AADF command buffer: %s",
+                     SDL_GetError());
+        goto cleanup_pipelines;
+    }
+
+    vx_dispatch_local_aadf(cmd, local_pipeline, voxel_occupancy_masks, voxel_aadf, grid_ext);
+    vx_dispatch_local_aadf(cmd, local_pipeline, brick_occupancy_masks, brick_aadf, brick_grid_ext);
+
+    uint32_t const  propagation_rounds = chunk_grid_ext - 1u;
+    SDL_GPUTexture* source = propagation_rounds % 2u != 0u ? chunk_aadf_scratch : chunk_aadf;
+    SDL_GPUTexture* destination = source == chunk_aadf ? chunk_aadf_scratch : chunk_aadf;
+    vx_dispatch_global_aadf(cmd, global_pipeline, chunk_occupancy_masks, destination, source,
+                            chunk_grid_ext, 0, true);
+    for (uint32_t round = 0; round < propagation_rounds; ++round)
+    {
+        for (uint32_t axis = 0; axis < 3u; ++axis)
+        {
+            vx_dispatch_global_aadf(cmd, global_pipeline, chunk_occupancy_masks, source,
+                                    destination, chunk_grid_ext, axis, false);
+            SDL_GPUTexture* const previous_source = source;
+            source = destination;
+            destination = previous_source;
+        }
+    }
+    assert(source == chunk_aadf);
+
+    if (!SDL_SubmitGPUCommandBuffer(cmd))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to submit AADF command buffer: %s",
+                     SDL_GetError());
+        goto cleanup_pipelines;
+    }
+
+    *out_voxel_aadf = voxel_aadf;
+    *out_brick_aadf = brick_aadf;
+    *out_chunk_aadf = chunk_aadf;
+    success = true;
+
+cleanup_pipelines:
+    if (global_pipeline)
+    {
+        SDL_ReleaseGPUComputePipeline(device, global_pipeline);
+    }
+    if (local_pipeline)
+    {
+        SDL_ReleaseGPUComputePipeline(device, local_pipeline);
+    }
+cleanup_textures:
+    if (chunk_aadf_scratch)
+    {
+        SDL_ReleaseGPUTexture(device, chunk_aadf_scratch);
+    }
+    if (!success)
+    {
+        if (chunk_aadf)
+        {
+            SDL_ReleaseGPUTexture(device, chunk_aadf);
+        }
+        if (brick_aadf)
+        {
+            SDL_ReleaseGPUTexture(device, brick_aadf);
+        }
+        if (voxel_aadf)
+        {
+            SDL_ReleaseGPUTexture(device, voxel_aadf);
+        }
+    }
+    return success;
 }
 
 typedef struct vx_camera
@@ -789,6 +1077,10 @@ typedef struct vxray
     SDL_GPUTexture*          voxel_texture;
     SDL_GPUTexture*          voxel_mask_texture;
     SDL_GPUTexture*          brick_mask_texture;
+    SDL_GPUTexture*          chunk_mask_texture;
+    SDL_GPUTexture*          voxel_aadf_texture;
+    SDL_GPUTexture*          brick_aadf_texture;
+    SDL_GPUTexture*          chunk_aadf_texture;
     SDL_GPUTexture*          gbuffer_albedo_texture;
     SDL_GPUTexture*          gbuffer_normal_texture;
     SDL_GPUTexture*          gbuffer_depth_texture;
@@ -841,8 +1133,7 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
                                    .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
                                    .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                            SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                                            SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                            SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
                                    .width = width,
                                    .height = height,
                                    .layer_count_or_depth = 1,
@@ -1014,8 +1305,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     }
     if (!SDL_GPUTextureSupportsFormat(
             vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R8_UINT, SDL_GPU_TEXTURETYPE_2D,
-            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ))
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_R8_UINT not supported on this device");
         return SDL_APP_FAILURE;
@@ -1041,7 +1331,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_storage_textures = 3,
+                                                 .num_storage_textures = 7,
                                                  .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -1111,7 +1401,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 1,
-                                                 .num_storage_textures = 2,
+                                                 .num_storage_textures = 3,
                                                  .num_storage_buffers = 3,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -1254,6 +1544,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             assert(scene.voxel_grid.ptr);
             assert(scene.voxel_masks.ptr);
             assert(scene.brick_masks.ptr);
+            assert(scene.chunk_masks.ptr);
             assert(scene.grid_ext);
             vxray_instance.grid_ext = scene.grid_ext;
         }
@@ -1271,12 +1562,15 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 vx_scene_free(&scene);
                 return SDL_APP_FAILURE;
             }
-            if (!SDL_GPUTextureSupportsFormat(
-                    vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R32G32_UINT,
-                    SDL_GPU_TEXTURETYPE_3D, SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ))
+            if (!SDL_GPUTextureSupportsFormat(vxray_instance.gpu_device,
+                                              SDL_GPU_TEXTUREFORMAT_R32_UINT,
+                                              SDL_GPU_TEXTURETYPE_3D,
+                                              SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+                                                  SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ |
+                                                  SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE))
             {
                 SDL_LogError(SDL_LOG_CATEGORY_GPU,
-                             "TEXTUREFORMAT_R32G32_UINT not supported on this device");
+                             "TEXTUREFORMAT_R32_UINT not supported on this device");
                 vx_scene_free(&scene);
                 return SDL_APP_FAILURE;
             }
@@ -1287,8 +1581,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     device,
                     (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_3D,
                                                .format = SDL_GPU_TEXTUREFORMAT_R8_UINT,
-                                               .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
-                                                        SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+                                               .usage = SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
                                                .width = scene.grid_ext,
                                                .height = scene.grid_ext,
                                                .layer_count_or_depth = scene.grid_ext,
@@ -1329,6 +1622,26 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     return SDL_APP_FAILURE;
                 }
                 vxray_instance.brick_mask_texture = brick_mask_texture;
+            }
+            {
+                SDL_GPUTexture* const chunk_mask_texture = vx_create_occupancy_mask_texture(
+                    device, scene.chunk_masks, scene.chunk_grid_ext, "chunk-occupancy-masks");
+                if (!chunk_mask_texture)
+                {
+                    vx_scene_free(&scene);
+                    return SDL_APP_FAILURE;
+                }
+                vxray_instance.chunk_mask_texture = chunk_mask_texture;
+            }
+            if (!vx_create_gpu_aadfs(
+                    device, vxray_instance.voxel_mask_texture, vxray_instance.brick_mask_texture,
+                    vxray_instance.chunk_mask_texture, (uint32_t)scene.grid_ext,
+                    (uint32_t)scene.brick_grid_ext, (uint32_t)scene.chunk_grid_ext,
+                    &vxray_instance.voxel_aadf_texture, &vxray_instance.brick_aadf_texture,
+                    &vxray_instance.chunk_aadf_texture))
+            {
+                vx_scene_free(&scene);
+                return SDL_APP_FAILURE;
             }
             {
                 uint32_t const palette_size = 4 * 256;
@@ -1624,10 +1937,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(isfinite(fov) && fov > 0.f && fov < VX_PI_F);
     assert(isfinite(near_plane) && near_plane > 0.f);
     assert(isfinite(far_plane) && far_plane > near_plane);
-    mat4s const view = glms_look_lh_zo(camera->position, forward, world_up);
-    mat4s       projection = glms_perspective_lh_zo(fov, aspect, near_plane, far_plane);
-    mat4s const view_projection = glms_mat4_mul(projection, view);
-    mat4s const inverse_view_projection = glms_mat4_inv(view_projection);
+    mat4s const            view = glms_look_lh_zo(camera->position, forward, world_up);
+    mat4s                  projection = glms_perspective_lh_zo(fov, aspect, near_plane, far_plane);
+    mat4s const            view_projection = glms_mat4_mul(projection, view);
+    mat4s const            inverse_view_projection = glms_mat4_inv(view_projection);
     gbuffer_uniforms const gbuffer_uniform_data = {
         .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
         .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
@@ -1699,9 +2012,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(gbuffer_pass);
     SDL_BindGPUGraphicsPipeline(gbuffer_pass, vxray_instance.gbuffer_pipeline);
     SDL_GPUTexture* const storage_textures[] = {
-        vxray_instance.voxel_texture,
-        vxray_instance.voxel_mask_texture,
-        vxray_instance.brick_mask_texture,
+        vxray_instance.voxel_texture,      vxray_instance.voxel_mask_texture,
+        vxray_instance.brick_mask_texture, vxray_instance.chunk_mask_texture,
+        vxray_instance.voxel_aadf_texture, vxray_instance.brick_aadf_texture,
+        vxray_instance.chunk_aadf_texture,
     };
     SDL_BindGPUFragmentStorageTextures(gbuffer_pass, 0, storage_textures,
                                        SDL_arraysize(storage_textures));
@@ -1731,6 +2045,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPUTexture* const rtao_storage_textures[] = {
         vxray_instance.gbuffer_normal_texture,
         vxray_instance.voxel_mask_texture,
+        vxray_instance.voxel_aadf_texture,
     };
     SDL_BindGPUFragmentStorageTextures(rtao_pass, 0, rtao_storage_textures,
                                        SDL_arraysize(rtao_storage_textures));
@@ -1846,10 +2161,34 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.brick_mask_texture = 0;
     }
 
+    if (vxray_instance.chunk_mask_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.chunk_mask_texture);
+        vxray_instance.chunk_mask_texture = 0;
+    }
+
     if (vxray_instance.voxel_mask_texture)
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.voxel_mask_texture);
         vxray_instance.voxel_mask_texture = 0;
+    }
+
+    if (vxray_instance.chunk_aadf_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.chunk_aadf_texture);
+        vxray_instance.chunk_aadf_texture = 0;
+    }
+
+    if (vxray_instance.brick_aadf_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.brick_aadf_texture);
+        vxray_instance.brick_aadf_texture = 0;
+    }
+
+    if (vxray_instance.voxel_aadf_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.voxel_aadf_texture);
+        vxray_instance.voxel_aadf_texture = 0;
     }
 
     if (vxray_instance.gbuffer_depth_texture)

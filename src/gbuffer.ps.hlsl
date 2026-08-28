@@ -12,9 +12,13 @@ struct ps_input
 ConstantBuffer<gbuffer_uniforms> uniforms : register(b0, space3);
 
 Texture3D<uint>        voxels : register(t0, space2);
-Texture3D<uint2>       voxel_masks : register(t1, space2);
-Texture3D<uint2>       brick_masks : register(t2, space2);
-StructuredBuffer<uint> palette_rgba : register(t3, space2);
+Texture3D<uint>        voxel_masks : register(t1, space2);
+Texture3D<uint>        brick_masks : register(t2, space2);
+Texture3D<uint>        chunk_masks : register(t3, space2);
+Texture3D<uint>        voxel_aadf : register(t4, space2);
+Texture3D<uint>        brick_aadf : register(t5, space2);
+Texture3D<uint>        chunk_aadf : register(t6, space2);
+StructuredBuffer<uint> palette_rgba : register(t7, space2);
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
@@ -34,7 +38,7 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
 {
     // "RAY AXIS-ALIGNED BOUNDING BOX INTERSECTION", Ray Tracing Gems II
 
-    float3 const t0 = (p0 - ray_origin) * inv_ray_dir; // inf is okay here
+    float3 const t0 = (p0 - ray_origin) * inv_ray_dir;
     float3 const t1 = (p1 - ray_origin) * inv_ray_dir;
     float3 const lo = min(t0, t1);
     float3 const hi = max(t0, t1);
@@ -43,27 +47,67 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     return tmin <= tmax;
 }
 
-// NOTE: ext is expected to be a power of two
-int mask_linear_idx(int16_t3 const coord, int const ext)
+uint mask_linear_idx(int16_t3 const coord)
 {
-    int const x = coord.x & (ext - 1);
-    int const y = coord.y & (ext - 1);
-    int const z = coord.z & (ext - 1);
-    return x + y * ext + z * ext * ext;
+    int16_t3 const local = coord & (VX_MASK_EXT - 1);
+    return local.x + local.y * VX_MASK_EXT + local.z * VX_MASK_EXT * VX_MASK_EXT;
 }
 
-bool mask_bit_test(uint2 const mask, int const index)
+bool mask_bit_test(uint const mask, int16_t3 const coord)
 {
-    uint const word = mask[index >> 5u];
-    uint const bit = 1u << (index & 31u);
-    return (word & bit) != 0;
+    uint const idx = mask_linear_idx(coord);
+    return (mask & (1u << idx)) != 0u;
+}
+
+bool chunk_occupied(int16_t3 const coord)
+{
+    uint const mask = chunk_masks.Load(int4(coord / VX_MASK_EXT, 0)).r;
+    return mask_bit_test(mask, coord);
+}
+
+bool brick_occupied(int16_t3 const coord)
+{
+    uint const mask = brick_masks.Load(int4(coord / VX_MASK_EXT, 0)).r;
+    return mask_bit_test(mask, coord);
+}
+
+bool voxel_occupied(int16_t3 const coord)
+{
+    uint const mask = voxel_masks.Load(int4(coord / VX_MASK_EXT, 0)).r;
+    return mask_bit_test(mask, coord);
+}
+
+// Convert an packed AADF element into the forward-facing planes of the empty region.
+float3 aadf_exit_plane(int16_t3 const coord, int16_t const cell_ext, uint const packed,
+                       float3 const ray_dir)
+{
+    // Axis-aligned distance fields are packed:
+    //
+    //  0 ..  4  -X
+    //  5 ..  9  +X
+    // 10 .. 14  -Y
+    // 15 .. 19  +Y
+    // 20 .. 24  -Z
+    // 25 .. 29  +Z
+    uint const     shift_x = ray_dir.x < 0.0 ? 0u : 5u;
+    uint const     shift_y = ray_dir.y < 0.0 ? 10u : 15u;
+    uint const     shift_z = ray_dir.z < 0.0 ? 20u : 25u;
+    int16_t3 const bounds =
+        int16_t3((packed >> shift_x) & 31u, (packed >> shift_y) & 31u, (packed >> shift_z) & 31u);
+
+    int16_t3 const lower = max((coord - int16_t3(bounds)) * cell_ext, (int16_t3)0);
+    int16_t3 const upper =
+        min((coord + 1 + int16_t3(bounds)) * cell_ext, (int16_t3)(int16_t)uniforms.grid_ext);
+    return float3(ray_dir.x < 0.0 ? lower.x : upper.x, ray_dir.y < 0.0 ? lower.y : upper.y,
+                  ray_dir.z < 0.0 ? lower.z : upper.z);
 }
 
 uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
 {
-    float3 const inv_dir = 1.0 / ray_dir;
+    float3 const inv_dir = 1.0 / (ray_dir + (float3)(ray_dir == 0.0) * 1e-30);
     float const  grid_ext = (float)uniforms.grid_ext;
-    float        tmin, tmax;
+    float        tmin;
+    float        tmax;
     if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)grid_ext, tmin, tmax))
     {
         return VX_NO_CELL;
@@ -82,66 +126,50 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
             return VX_NO_CELL;
         }
 
-        // Determine occupancy level to use
+        int16_t  cell_ext = VX_BRICK_EXT * VX_CHUNK_EXT;
+        int16_t3 coord = ipos / (VX_BRICK_EXT * VX_CHUNK_EXT);
+        bool     occupied = chunk_occupied(coord);
 
-        int     mask_idx = mask_linear_idx(ipos >> 3, 4);
-        uint2   mask = brick_masks.Load(int4(ipos >> 5, 0)).rg;
-        int16_t scale = (int16_t)VX_BRICK_EXT;
-
-        if (mask_bit_test(mask, mask_idx))
+        if (occupied)
         {
-            mask_idx = mask_linear_idx(ipos, 4);
-            mask = voxel_masks.Load(int4(ipos >> 2, 0)).rg;
-            scale = 1;
-
-            if (mask_bit_test(mask, mask_idx))
-            {
-                return pack_voxel_cell(ipos);
-            }
+            cell_ext = VX_BRICK_EXT;
+            coord = ipos / VX_BRICK_EXT;
+            occupied = brick_occupied(coord);
         }
 
-        // Determine largest empty region containing `ipos`
-
-        int16_t lod;
-
-        if ((mask.x | mask.y) == 0u)
+        if (occupied)
         {
-            // Entire 4x4x4 region is empty
-            lod = 4;
+            cell_ext = 1;
+            coord = ipos;
+            occupied = voxel_occupied(coord);
+        }
+
+        if (occupied)
+        {
+            return pack_voxel_cell(ipos);
+        }
+
+        uint aadf;
+        if (cell_ext == VX_BRICK_EXT * VX_CHUNK_EXT)
+        {
+            aadf = chunk_aadf.Load(int4(coord, 0)).r;
+        }
+        else if (cell_ext == VX_BRICK_EXT)
+        {
+            aadf = brick_aadf.Load(int4(coord, 0)).r;
         }
         else
         {
-            uint const mask_part = mask_idx < 32 ? mask.x : mask.y;
-            // Is the containing 2x2x2 region empty?
-            // 0x0A preserves the high bits of the 2x2x2 block's local x and y coordinates.
-            // 0x00330033 selects the relevant 2x2x2 bits.
-            if (((mask_part >> (mask_idx & 0x0A)) & 0x00330033u) == 0)
-            {
-                lod = 2;
-            }
-            else
-            {
-                lod = 1;
-            }
+            aadf = voxel_aadf.Load(int4(coord, 0)).r;
         }
 
-        lod *= scale;
-
-        // Intersect the ray with the forward-facing planes of the empty region
-        int16_t const  cell_mask = lod - 1;
-        int16_t3 const cell_min = ipos & ~cell_mask;
-        int16_t3 const cell_max = cell_min + lod;
-        float3 const   exit_plane = float3(ray_dir.x < 0.0 ? cell_min.x : cell_max.x,
-                                           ray_dir.y < 0.0 ? cell_min.y : cell_max.y,
-                                           ray_dir.z < 0.0 ? cell_min.z : cell_max.z);
-
-        float3 side_dist = (exit_plane - float3(ipos) - local_pos) * inv_dir;
+        float3 const exit_plane = aadf_exit_plane(coord, cell_ext, aadf, ray_dir);
+        float3       side_dist = (exit_plane - float3(ipos) - local_pos) * inv_dir;
         side_dist.x = ray_dir.x == 0.0 ? 3e+38 : side_dist.x;
         side_dist.y = ray_dir.y == 0.0 ? 3e+38 : side_dist.y;
         side_dist.z = ray_dir.z == 0.0 ? 3e+38 : side_dist.z;
-        float const  t = min(side_dist.x, min(side_dist.y, side_dist.z));
-        float3 const crossed = step(side_dist, t);
-
+        float const    t = min(side_dist.x, min(side_dist.y, side_dist.z));
+        float3 const   crossed = step(side_dist, t);
         float3 const   advanced = local_pos + t * ray_dir;
         int16_t3 const cell_delta = int16_t3(floor(advanced + crossed * sign(ray_dir) * 0.5));
         ipos += cell_delta;
@@ -159,7 +187,7 @@ struct voxel_intersection
 
 voxel_intersection intersect_voxel(float3 const origin, float3 const dir, int16_t3 const cell)
 {
-    float3 const inv_dir = 1.0 / dir;
+    float3 const inv_dir = 1.0 / (dir + (float3)(dir == 0.0) * 1e-30);
     float3 const cell_min = float3(cell);
     float3 const cell_max = cell_min + 1.0;
     float3 const t0 = (cell_min - origin) * inv_dir;
