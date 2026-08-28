@@ -62,7 +62,6 @@ float4 main(ps_input const input) : SV_Target0
     uint2 const  pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
     float2 const pixel_uv = (float2(pixel) + 0.5) / float2(width, height);
     float const  surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
-
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL ||

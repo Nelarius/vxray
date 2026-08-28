@@ -22,10 +22,10 @@ StructuredBuffer<uint> palette_rgba : register(t7, space2);
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
-uint pack_voxel_cell(int16_t3 const cell)
+uint pack_voxel_cell(int16_t3 const cell, uint const axis)
 {
     uint3 const c = uint3(cell);
-    return c.x | (c.y << 10u) | (c.z << 20u);
+    return c.x | (c.y << 10u) | (c.z << 20u) | (axis << 30u);
 }
 
 int16_t3 unpack_voxel_cell(uint const packed)
@@ -34,7 +34,7 @@ int16_t3 unpack_voxel_cell(uint const packed)
 }
 
 bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 const p0,
-                  float3 const p1, out float tmin, out float tmax)
+                  float3 const p1, out float tmin, out float tmax, out float3 entry_mask)
 {
     // "RAY AXIS-ALIGNED BOUNDING BOX INTERSECTION", Ray Tracing Gems II
 
@@ -44,6 +44,7 @@ bool ray_box_test(float3 const ray_origin, float3 const inv_ray_dir, float3 cons
     float3 const hi = max(t0, t1);
     tmin = max(max(lo.x, lo.y), max(lo.z, 0.0));
     tmax = min(min(hi.x, hi.y), hi.z);
+    entry_mask = tmin > 0.0 ? step(tmin, lo) : (float3)0.0;
     return tmin <= tmax;
 }
 
@@ -108,16 +109,18 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
     float const  grid_ext = (float)uniforms.grid_ext;
     float        tmin;
     float        tmax;
-    if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)grid_ext, tmin, tmax))
+    float3       entry_mask;
+    if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)grid_ext, tmin, tmax, entry_mask))
     {
         return VX_NO_CELL;
     }
 
-    bool const   camera_inside = all(ray_origin >= (float3)0.0) && all(ray_origin < grid_ext);
-    float3 const start =
-        camera_inside ? ray_origin : offset_ray(ray_origin + tmin * ray_dir, ray_dir);
-    int16_t3 ipos = int16_t3(floor(start));
-    float3   local_pos = start - float3(ipos);
+    float3 const start = ray_origin + tmin * ray_dir;
+    int16_t3     ipos = int16_t3(floor(start + entry_mask * sign(ray_dir) * 0.5));
+    float3       local_pos = start - float3(ipos);
+    float3 const entry_weights = entry_mask * abs(ray_dir);
+    uint         crossed_axis = entry_weights.y > entry_weights.x ? 1u : 0u;
+    crossed_axis = entry_weights.z > max(entry_weights.x, entry_weights.y) ? 2u : crossed_axis;
 
     for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
     {
@@ -146,7 +149,7 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
 
         if (occupied)
         {
-            return pack_voxel_cell(ipos);
+            return pack_voxel_cell(ipos, crossed_axis);
         }
 
         uint aadf;
@@ -168,40 +171,19 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
         side_dist.x = ray_dir.x == 0.0 ? 3e+38 : side_dist.x;
         side_dist.y = ray_dir.y == 0.0 ? 3e+38 : side_dist.y;
         side_dist.z = ray_dir.z == 0.0 ? 3e+38 : side_dist.z;
-        float const    t = min(side_dist.x, min(side_dist.y, side_dist.z));
-        float3 const   crossed = step(side_dist, t);
-        float3 const   advanced = local_pos + t * ray_dir;
+        float const  t = min(side_dist.x, min(side_dist.y, side_dist.z));
+        float3 const crossed = step(side_dist, t);
+        float3 const crossed_weights = crossed * abs(ray_dir);
+        crossed_axis = crossed_weights.y > crossed_weights.x ? 1u : 0u;
+        crossed_axis =
+            crossed_weights.z > max(crossed_weights.x, crossed_weights.y) ? 2u : crossed_axis;
+        float3 const   advanced = local_pos + max(t, 0.0001) * ray_dir;
         int16_t3 const cell_delta = int16_t3(floor(advanced + crossed * sign(ray_dir) * 0.5));
         ipos += cell_delta;
         local_pos = advanced - float3(cell_delta);
     }
 
     return VX_NO_CELL;
-}
-
-struct voxel_intersection
-{
-    float  distance;
-    float3 normal;
-};
-
-voxel_intersection intersect_voxel(float3 const origin, float3 const dir, int16_t3 const cell)
-{
-    float3 const inv_dir = 1.0 / (dir + (float3)(dir == 0.0) * 1e-30);
-    float3 const cell_min = float3(cell);
-    float3 const cell_max = cell_min + 1.0;
-    float3 const t0 = (cell_min - origin) * inv_dir;
-    float3 const t1 = (cell_max - origin) * inv_dir;
-    float3 const t_near = min(t0, t1);
-    float3 const axis_mask = step(-t_near, min(-t_near.yzx, -t_near.zxy));
-
-    // TODO: this can produce diagonal normals for an exact edge or corner hit
-
-    voxel_intersection result;
-    result.distance = max(t_near.x, max(t_near.y, t_near.z));
-    result.normal = -sign(dir) * axis_mask;
-
-    return result;
 }
 
 struct ps_output
@@ -232,19 +214,24 @@ ps_output main(ps_input const input)
         return miss();
     }
 
-    int16_t3 const           cell = unpack_voxel_cell(packed_cell);
-    voxel_intersection const intersection = intersect_voxel(uniforms.camera_pos.xyz, dir, cell);
-    if (intersection.distance <= 0.0)
+    int16_t3 const cell = unpack_voxel_cell(packed_cell);
+    uint const     axis = packed_cell >> 30u;
+    float3 const   axis_mask = float3(axis == uint3(0u, 1u, 2u));
+    float3 const   normal = -sign(dir) * axis_mask;
+    float3 const   entry_plane = float3(cell) + (float3)(dir < 0.0);
+    float const    distance =
+        dot(entry_plane - uniforms.camera_pos.xyz, axis_mask) / dot(dir, axis_mask);
+    if (distance <= 0.0)
     {
         return miss();
     }
 
-    float3 const hit_position = uniforms.camera_pos.xyz + intersection.distance * dir;
+    float3 const hit_position = uniforms.camera_pos.xyz + distance * dir;
     float4 const clip_position = mul(uniforms.view_projection, float4(hit_position, 1.0));
 
     ps_output output;
     output.albedo = palette_rgba[voxel_at(cell)];
-    output.normal = pack_normal(intersection.normal);
+    output.normal = pack_normal(normal);
     output.depth = clip_position.z / clip_position.w;
     return output;
 }
