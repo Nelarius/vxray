@@ -131,7 +131,13 @@ bool sparse_ray_march(float3 const ray_origin, float3 const ray_dir, float const
     return false;
 }
 
-uint spatial_hash_find_or_insert(spatial_hash_key const key)
+struct spatial_hash_value
+{
+    uint index;
+    uint payload;
+};
+
+spatial_hash_value spatial_hash_find_or_insert(spatial_hash_key const key)
 {
     uint const frame = uniforms.frame_index;
     uint       index = key.hash & VX_AO_HASH_MASK;
@@ -144,7 +150,11 @@ uint spatial_hash_find_or_insert(spatial_hash_key const key)
         if (ex_checksum == 0 || ex_checksum == key.checksum)
         {
             InterlockedExchange(hash_frames[index], frame, ex_frame);
-            return index;
+            spatial_hash_value result;
+            spatial_hash_value v;
+            v.index = index;
+            v.payload = hash_payloads[index];
+            return v;
         }
         ex_frame = hash_frames[index];
         if (frame - ex_frame > VX_AO_MAX_CELL_AGE)
@@ -153,13 +163,19 @@ uint spatial_hash_find_or_insert(spatial_hash_key const key)
             InterlockedExchange(hash_checksums[index], key.checksum, ex);
             InterlockedExchange(hash_payloads[index], 0, ex);
             InterlockedExchange(hash_frames[index], frame, ex_frame);
-            return index;
+            spatial_hash_value v;
+            v.index = index;
+            v.payload = 0u;
+            return v;
         }
 
         index = (index + 1u) & VX_AO_HASH_MASK;
     }
 
-    return 0xFFFFFFFFu;
+    spatial_hash_value v;
+    v.index = 0xFFFFFFFFu;
+    v.payload = 0u;
+    return v;
 }
 
 float main(ps_input const input) : SV_Target0
@@ -182,13 +198,13 @@ float main(ps_input const input) : SV_Target0
                                               uniforms.render_height, uniforms.sp, uniforms.smin);
     spatial_hash_key const key = make_spatial_hash_key(face_position, normal, cell_size);
 
-    uint const index = spatial_hash_find_or_insert(key);
-    if (index == 0xFFFFFFFFu)
+    spatial_hash_value value = spatial_hash_find_or_insert(key);
+    if (value.index == 0xFFFFFFFFu)
     {
         return -1.0;
     }
 
-    uint const payload = hash_payloads[index];
+    uint const payload = value.payload;
     uint const sample_count = payload & 0xFFFFu;
     if (sample_count >= VX_AO_SAMPLE_LIMIT)
     {
@@ -200,7 +216,8 @@ float main(ps_input const input) : SV_Target0
         uint2(uniforms.frame_index * 0x9E3779B9u, pcg(uniforms.frame_index ^ 0xA511E9B3u));
     float2 const pixel_noise = as_normalized_float(pcg2d(pixel ^ frame_seed));
     uint         occlusion_count = 0u;
-    for (uint i = 0u; i < VX_AO_RAYS_PER_PIXEL; ++i)
+    uint const   ray_count = sample_count < 500u ? 2u * VX_AO_RAYS_PER_PIXEL : VX_AO_RAYS_PER_PIXEL;
+    for (uint i = 0u; i < ray_count; ++i)
     {
         float2 const u = frac(pixel_noise + r2_sequence((float)i));
         float3 const direction =
@@ -211,8 +228,7 @@ float main(ps_input const input) : SV_Target0
         }
     }
     uint ex_occlusion;
-    InterlockedAdd(hash_payloads[index], (occlusion_count << 16u) | VX_AO_RAYS_PER_PIXEL,
-                   ex_occlusion);
+    InterlockedAdd(hash_payloads[value.index], (occlusion_count << 16u) | ray_count, ex_occlusion);
     return 1.0 - (float)((ex_occlusion >> 16u) + occlusion_count) /
-                     (float)((ex_occlusion & 0xFFFFu) + VX_AO_RAYS_PER_PIXEL);
+                     (float)((ex_occlusion & 0xFFFFu) + ray_count);
 }
