@@ -216,17 +216,23 @@ float main(ps_input const input) : SV_Target0
     uint2 const  frame_seed =
         uint2(uniforms.frame_index * 0x9E3779B9u, pcg(uniforms.frame_index ^ 0xA511E9B3u));
     float2 const pixel_noise = as_normalized_float(pcg2d(pixel ^ frame_seed));
-    uint         occlusion_count = 0u;
-    for (uint i = 0u; i < VX_AO_RAYS_PER_PIXEL; ++i)
+    float3       directions[VX_AO_RAYS_PER_PIXEL];
+    for (int i = 0; i < VX_AO_RAYS_PER_PIXEL; ++i)
     {
         float2 const u = frac(pixel_noise + r2_sequence((float)i));
-        float3 const direction =
-            orient_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
+        directions[i] = orient_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
+    }
+
+    uint occlusion_count = 0u;
+    for (uint i = 0u; i < VX_AO_RAYS_PER_PIXEL; ++i)
+    {
+        float3 const direction = directions[i];
         if (sparse_ray_march(pos, direction, uniforms.rtao_radius))
         {
             ++occlusion_count;
         }
     }
+
     uint ex_occlusion;
     InterlockedAdd(hash_payloads[index], (occlusion_count << 16u) | VX_AO_RAYS_PER_PIXEL,
                    ex_occlusion);
