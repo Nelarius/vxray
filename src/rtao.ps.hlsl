@@ -199,7 +199,8 @@ float main(ps_input const input) : SV_Target0
     spatial_hash_key const key = make_spatial_hash_key(face_position, normal, cell_size);
 
     spatial_hash_value value = spatial_hash_find_or_insert(key);
-    if (value.index == 0xFFFFFFFFu)
+    uint const         index = value.index;
+    if (index == 0xFFFFFFFFu)
     {
         return -1.0;
     }
@@ -216,8 +217,7 @@ float main(ps_input const input) : SV_Target0
         uint2(uniforms.frame_index * 0x9E3779B9u, pcg(uniforms.frame_index ^ 0xA511E9B3u));
     float2 const pixel_noise = as_normalized_float(pcg2d(pixel ^ frame_seed));
     uint         occlusion_count = 0u;
-    uint const   ray_count = sample_count < 500u ? 2u * VX_AO_RAYS_PER_PIXEL : VX_AO_RAYS_PER_PIXEL;
-    for (uint i = 0u; i < ray_count; ++i)
+    for (uint i = 0u; i < VX_AO_RAYS_PER_PIXEL; ++i)
     {
         float2 const u = frac(pixel_noise + r2_sequence((float)i));
         float3 const direction =
@@ -228,7 +228,8 @@ float main(ps_input const input) : SV_Target0
         }
     }
     uint ex_occlusion;
-    InterlockedAdd(hash_payloads[value.index], (occlusion_count << 16u) | ray_count, ex_occlusion);
+    InterlockedAdd(hash_payloads[index], (occlusion_count << 16u) | VX_AO_RAYS_PER_PIXEL,
+                   ex_occlusion);
     return 1.0 - (float)((ex_occlusion >> 16u) + occlusion_count) /
-                     (float)((ex_occlusion & 0xFFFFu) + ray_count);
+                     (float)((ex_occlusion & 0xFFFFu) + VX_AO_RAYS_PER_PIXEL);
 }
