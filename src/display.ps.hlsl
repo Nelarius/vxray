@@ -12,6 +12,7 @@ Texture2D<float> depth_tex : register(t0, space2);
 Texture2D<float> visibility_tex : register(t1, space2);
 Texture2D<uint>  albedo_tex : register(t2, space2);
 Texture2D<uint>  normal_tex : register(t3, space2);
+Texture2D<uint>  spatial_index_tex : register(t4, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 SamplerState visibility_sampler : register(s1, space2);
@@ -55,6 +56,12 @@ float3 cell_size_color(float const cell_size, float const smin)
     return palette[(uint)exponent & 7u];
 }
 
+float3 spatial_index_color(uint const index)
+{
+    uint const color = pcg(index);
+    return 0.25 + 0.75 * float3(color & 255u, (color >> 8u) & 255u, (color >> 16u) & 255u) / 255.0;
+}
+
 float4 main(ps_input const input) : SV_Target0
 {
     uint width, height;
@@ -65,7 +72,8 @@ float4 main(ps_input const input) : SV_Target0
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL ||
-        uniforms.texture_type == VX_DISPLAY_TEXTURE_CELL_SIZE)
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_CELL_SIZE ||
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_SPATIAL_INDEX)
     {
         if (surface_depth >= 1.0)
         {
@@ -87,6 +95,12 @@ float4 main(ps_input const input) : SV_Target0
                 compute_cell_size(view_depth, uniforms.vertical_fov, uniforms.render_height,
                                   uniforms.sp, uniforms.smin);
             return float4(cell_size_color(cell_size, uniforms.smin), 1.0);
+        }
+        if (uniforms.texture_type == VX_DISPLAY_TEXTURE_SPATIAL_INDEX)
+        {
+            uint const index = spatial_index_tex.Load(texel).r;
+            return index == 0xFFFFFFFFu ? CACHE_FAILURE_COLOR
+                                        : float4(spatial_index_color(index), 1.0);
         }
 
         float const visibility = visibility_tex.SampleLevel(visibility_sampler, pixel_uv, 0.0).r;

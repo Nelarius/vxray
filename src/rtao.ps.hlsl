@@ -9,12 +9,11 @@ struct ps_input
 };
 
 Texture2D<float>         depth_tex : register(t0, space2);
-Texture2D<uint>          normal_tex : register(t1, space2);
-Texture3D<uint>          voxel_masks : register(t2, space2);
-Texture3D<uint>          voxel_aadf : register(t3, space2);
-RWStructuredBuffer<uint> hash_checksums : register(u4, space2);
+Texture2D<uint>          hash_index_tex : register(t1, space2);
+Texture2D<uint>          normal_tex : register(t2, space2);
+Texture3D<uint>          voxel_masks : register(t3, space2);
+Texture3D<uint>          voxel_aadf : register(t4, space2);
 RWStructuredBuffer<uint> hash_payloads : register(u5, space2);
-RWStructuredBuffer<uint> hash_frames : register(u6, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 
@@ -131,53 +130,6 @@ bool sparse_ray_march(float3 const ray_origin, float3 const ray_dir, float const
     return false;
 }
 
-struct spatial_hash_value
-{
-    uint index;
-    uint payload;
-};
-
-spatial_hash_value spatial_hash_find_or_insert(spatial_hash_key const key)
-{
-    uint const frame = uniforms.frame_index;
-    uint       index = key.hash & VX_AO_HASH_MASK;
-    for (uint probe = 0; probe < VX_AO_HASH_PROBE_COUNT; ++probe)
-    {
-        uint ex_checksum;
-        InterlockedCompareExchange(hash_checksums[index], 0, key.checksum, ex_checksum);
-
-        uint ex_frame;
-        if (ex_checksum == 0 || ex_checksum == key.checksum)
-        {
-            InterlockedExchange(hash_frames[index], frame, ex_frame);
-            spatial_hash_value result;
-            spatial_hash_value v;
-            v.index = index;
-            v.payload = hash_payloads[index];
-            return v;
-        }
-        ex_frame = hash_frames[index];
-        if (frame - ex_frame > VX_AO_MAX_CELL_AGE)
-        {
-            uint ex;
-            InterlockedExchange(hash_checksums[index], key.checksum, ex);
-            InterlockedExchange(hash_payloads[index], 0, ex);
-            InterlockedExchange(hash_frames[index], frame, ex_frame);
-            spatial_hash_value v;
-            v.index = index;
-            v.payload = 0u;
-            return v;
-        }
-
-        index = (index + 1u) & VX_AO_HASH_MASK;
-    }
-
-    spatial_hash_value v;
-    v.index = 0xFFFFFFFFu;
-    v.payload = 0u;
-    return v;
-}
-
 float main(ps_input const input) : SV_Target0
 {
     uint width, height;
@@ -190,22 +142,16 @@ float main(ps_input const input) : SV_Target0
         return -1.0;
     }
 
-    float3 const normal = unpack_normal(normal_tex.Load(int3(pixel, 0)).r);
-    float3 const face_position =
-        reconstruct_position(uniforms.inverse_view_projection, uv, depth, normal);
-    float const view_depth = linear_view_depth(depth, uniforms.near_plane, uniforms.far_plane);
-    float const cell_size = compute_cell_size(view_depth, uniforms.vertical_fov,
-                                              uniforms.render_height, uniforms.sp, uniforms.smin);
-    spatial_hash_key const key = make_spatial_hash_key(face_position, normal, cell_size);
-
-    spatial_hash_value value = spatial_hash_find_or_insert(key);
-    uint const         index = value.index;
+    uint const index = hash_index_tex.Load(int3(pixel, 0)).r;
     if (index == 0xFFFFFFFFu)
     {
         return -1.0;
     }
 
-    uint const payload = value.payload;
+    float3 const normal = unpack_normal(normal_tex.Load(int3(pixel, 0)).r);
+    float3 const face_position =
+        reconstruct_position(uniforms.inverse_view_projection, uv, depth, normal);
+    uint const payload = hash_payloads[index];
     uint const sample_count = payload & 0xFFFFu;
     if (sample_count >= VX_AO_SAMPLE_LIMIT)
     {
@@ -216,26 +162,12 @@ float main(ps_input const input) : SV_Target0
     uint2 const  frame_seed =
         uint2(uniforms.frame_index * 0x9E3779B9u, pcg(uniforms.frame_index ^ 0xA511E9B3u));
     float2 const pixel_noise = as_normalized_float(pcg2d(pixel ^ frame_seed));
-    float3       directions[VX_AO_RAYS_PER_PIXEL];
-    for (int i = 0; i < VX_AO_RAYS_PER_PIXEL; ++i)
-    {
-        float2 const u = frac(pixel_noise + r2_sequence((float)i));
-        directions[i] = orient_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
-    }
-
-    uint occlusion_count = 0u;
-    for (uint i = 0u; i < VX_AO_RAYS_PER_PIXEL; ++i)
-    {
-        float3 const direction = directions[i];
-        if (sparse_ray_march(pos, direction, uniforms.rtao_radius))
-        {
-            ++occlusion_count;
-        }
-    }
+    float2 const u = frac(pixel_noise + r2_sequence((float)uniforms.sample_index));
+    float3 const direction = orient_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
+    uint const   occlusion = sparse_ray_march(pos, direction, uniforms.rtao_radius);
 
     uint ex_occlusion;
-    InterlockedAdd(hash_payloads[index], (occlusion_count << 16u) | VX_AO_RAYS_PER_PIXEL,
-                   ex_occlusion);
-    return 1.0 - (float)((ex_occlusion >> 16u) + occlusion_count) /
-                     (float)((ex_occlusion & 0xFFFFu) + VX_AO_RAYS_PER_PIXEL);
+    InterlockedAdd(hash_payloads[index], (occlusion << 16u) | 1u, ex_occlusion);
+    return 1.0 -
+           (float)((ex_occlusion >> 16u) + occlusion) / (float)((ex_occlusion & 0xFFFFu) + 1u);
 }
