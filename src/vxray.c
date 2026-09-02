@@ -2145,7 +2145,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     sky_view_changed |= igSliderFloat("Sun azimuth", &vxray_instance.sun_azimuth_degrees, 0.f,
                                       360.f, "%.1f deg", 0);
     sky_view_changed |=
-        igSliderFloat("View altitude", &vxray_instance.view_altitude_km, 0.f, 25.f, "%.1f km", 0);
+        igSliderFloat("View altitude", &vxray_instance.view_altitude_km, 0.1f, 25.f, "%.1f km", 0);
     vxray_instance.sky_view_dirty |= sky_view_changed;
     igEnd();
     igRender();
