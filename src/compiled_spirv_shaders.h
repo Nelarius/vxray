@@ -25,3 +25,6 @@ extern size_t const RTAO_INDEX_PS_SIZE;
 
 extern uint8_t const RTAO_PS_BYTES[];
 extern size_t const RTAO_PS_SIZE;
+
+extern uint8_t const SKY_VIEW_PS_BYTES[];
+extern size_t const SKY_VIEW_PS_SIZE;

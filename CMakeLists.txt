@@ -31,7 +31,8 @@ set(VXRAY_SHADER_SOURCES
         fullscreen.vs.hlsl
         gbuffer.ps.hlsl
         rtao_index.ps.hlsl
-        rtao.ps.hlsl)
+        rtao.ps.hlsl
+        sky_view.ps.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
 set(VXRAY_COMPILED_METAL_SHADERS_H ${CMAKE_CURRENT_SOURCE_DIR}/src/compiled_metal_shaders.h)
@@ -54,6 +55,7 @@ add_custom_command(
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/display.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/gbuffer.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/rtao.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/sky.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/spatial_hash.hlsli
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/shared.hlsli)
 add_custom_target(compile-vxray-shaders DEPENDS ${VXRAY_COMPILED_METAL_SHADERS_C} ${VXRAY_COMPILED_SPIRV_SHADERS_C})
@@ -94,6 +96,8 @@ set(VXRAY_SOURCES
         rtao.h
         rtao_index.ps.hlsl
         rtao.ps.hlsl
+        sky.h
+        sky_view.ps.hlsl
         spatial_hash.hlsli
         shared.hlsli
         vxray.c)

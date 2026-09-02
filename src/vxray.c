@@ -4,6 +4,7 @@
 #include "gbuffer.h"
 #include "hlsl_shim.h"
 #include "rtao.h"
+#include "sky.h"
 
 #include <cglm/struct.h>
 #include <cglm/struct/clipspace/persp_lh_zo.h>
@@ -41,6 +42,7 @@ static_assert(sizeof(float4x4) == 64, "float4x4 must match an HLSL column-major 
 static_assert(sizeof(display_uniforms) == 32, "display uniform layout must match HLSL");
 static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
 static_assert(sizeof(rtao_uniforms) == 192, "RTAO uniform layout must match HLSL");
+static_assert(sizeof(sky_view_uniforms) == 48, "sky-view uniform layout must match HLSL");
 static_assert((VX_AO_HASH_TOUCH_PERIOD & (VX_AO_HASH_TOUCH_PERIOD - 1u)) == 0u,
               "AO hash touch period must be a power of two");
 static_assert(VX_AO_HASH_TOUCH_PERIOD <= VX_AO_MAX_CELL_AGE,
@@ -1075,6 +1077,10 @@ typedef struct vxray
     int       rtao_samples_per_frame;
     float     ao_sp;
     float     ao_smin;
+    float     sun_elevation_degrees;
+    float     sun_azimuth_degrees;
+    float     view_altitude_km;
+    bool      sky_view_dirty;
     uint32_t  frame_index;
     float4x4  previous_view_projection;
     bool      rtao_history_valid;
@@ -1086,6 +1092,7 @@ typedef struct vxray
     SDL_GPUGraphicsPipeline* gbuffer_pipeline;
     SDL_GPUGraphicsPipeline* rtao_index_pipeline;
     SDL_GPUGraphicsPipeline* rtao_pipeline;
+    SDL_GPUGraphicsPipeline* sky_view_pipeline;
     SDL_GPUGraphicsPipeline* display_pipeline;
     SDL_GPUTexture*          voxel_texture;
     SDL_GPUTexture*          voxel_mask_texture;
@@ -1100,9 +1107,11 @@ typedef struct vxray
     SDL_GPUTexture*          rtao_index_textures[2];
     SDL_GPUTexture*          rtao_checksum_textures[2];
     SDL_GPUTexture*          rtao_visibility_texture;
+    SDL_GPUTexture*          sky_view_texture;
     uint32_t                 render_width;
     uint32_t                 render_height;
     SDL_GPUSampler*          display_sampler;
+    SDL_GPUSampler*          sky_view_sampler;
     SDL_GPUBuffer*           palette_buffer;
     SDL_GPUBuffer*           ao_checksum_buffer;
     SDL_GPUBuffer*           ao_payload_buffer;
@@ -1305,6 +1314,10 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     vxray_instance.rtao_samples_per_frame = 1;
     vxray_instance.ao_sp = 10.f;
     vxray_instance.ao_smin = 0.07f;
+    vxray_instance.sun_elevation_degrees = 10.f;
+    vxray_instance.sun_azimuth_degrees = 180.f;
+    vxray_instance.view_altitude_km = 1.f;
+    vxray_instance.sky_view_dirty = true;
 
     if (argc < 2 || argc > 3)
     {
@@ -1397,6 +1410,15 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER))
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "TEXTUREFORMAT_R16_FLOAT not supported on this device");
+        return SDL_APP_FAILURE;
+    }
+    if (!SDL_GPUTextureSupportsFormat(
+            vxray_instance.gpu_device, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+            SDL_GPU_TEXTURETYPE_2D,
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                     "TEXTUREFORMAT_R16G16B16A16_FLOAT not supported on this device");
         return SDL_APP_FAILURE;
     }
 
@@ -1595,6 +1617,84 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
     }
 
+    // Sky-view LUT pipeline
+
+    {
+        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
+                                                 .code = FULLSCREEN_VS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX};
+        SDL_GPUShaderCreateInfo const ps_info = {.code_size = SKY_VIEW_PS_SIZE,
+                                                 .code = SKY_VIEW_PS_BYTES,
+                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
+                                                 .format = GPU_SHADER_FORMAT,
+                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                 .num_uniform_buffers = 1};
+        SDL_GPUShader* const          vertex_shader =
+            SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
+        SDL_GPUShader* const fragment_shader =
+            SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
+        if (!vertex_shader || !fragment_shader)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create sky-view shaders: %s",
+                         SDL_GetError());
+            if (fragment_shader)
+            {
+                SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
+            }
+            if (vertex_shader)
+            {
+                SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
+            }
+            return SDL_APP_FAILURE;
+        }
+
+        vxray_instance.sky_view_pipeline = vx_create_gpu_graphics_pipeline(
+            vxray_instance.gpu_device,
+            (SDL_GPUGraphicsPipelineCreateInfo){
+                .vertex_shader = vertex_shader,
+                .fragment_shader = fragment_shader,
+                .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+                .rasterizer_state =
+                    (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
+                                             .cull_mode = SDL_GPU_CULLMODE_BACK,
+                                             .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
+                .target_info =
+                    (SDL_GPUGraphicsPipelineTargetInfo){
+                        .num_color_targets = 1,
+                        .color_target_descriptions =
+                            (SDL_GPUColorTargetDescription[]){
+                                {.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT}}}},
+            "sky-view-raster");
+        SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
+        SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
+        if (!vxray_instance.sky_view_pipeline)
+        {
+            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create sky-view pipeline: %s",
+                         SDL_GetError());
+            return SDL_APP_FAILURE;
+        }
+    }
+
+    vxray_instance.sky_view_texture = vx_create_gpu_texture(
+        vxray_instance.gpu_device,
+        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
+                                   .format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                   .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                            SDL_GPU_TEXTUREUSAGE_SAMPLER,
+                                   .width = VX_SKY_LUT_WIDTH,
+                                   .height = VX_SKY_LUT_HEIGHT,
+                                   .layer_count_or_depth = 1,
+                                   .num_levels = 1,
+                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
+        "sky-view-lut");
+    if (!vxray_instance.sky_view_texture)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create sky-view LUT: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
     // Fullscreen display pipeline
 
     {
@@ -1608,7 +1708,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_samplers = 2,
+                                                 .num_samplers = 3,
                                                  .num_storage_textures = 3,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -1669,6 +1769,20 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
     if (!vxray_instance.display_sampler)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create display sampler: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
+    vxray_instance.sky_view_sampler = SDL_CreateGPUSampler(
+        vxray_instance.gpu_device,
+        &(SDL_GPUSamplerCreateInfo){.min_filter = SDL_GPU_FILTER_LINEAR,
+                                    .mag_filter = SDL_GPU_FILTER_LINEAR,
+                                    .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
+                                    .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+                                    .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+                                    .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE});
+    if (!vxray_instance.sky_view_sampler)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create sky-view sampler: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
@@ -2017,6 +2131,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                          VX_DISPLAY_TEXTURE_CELL_SIZE);
     igRadioButton_IntPtr("Spatial index", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_SPATIAL_INDEX);
+    igRadioButton_IntPtr("Sky-view LUT", &vxray_instance.display_texture,
+                         VX_DISPLAY_TEXTURE_SKY_VIEW);
     bool invalidate_ao =
         igSliderFloat("rtao_radius", &vxray_instance.rtao_radius, 8.f, 16.f, "%.1f voxels", 0);
     igSliderInt("RTAO samples/pixel/frame", &vxray_instance.rtao_samples_per_frame, 1,
@@ -2024,6 +2140,13 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     invalidate_ao |= igSliderFloat("sp", &vxray_instance.ao_sp, 1.f, 16.f, "%.1f px", 0);
     invalidate_ao |= igSliderFloat("smin", &vxray_instance.ao_smin, 0.01f, 2.f, "%.3f",
                                    ImGuiSliderFlags_Logarithmic);
+    bool sky_view_changed = igSliderFloat("Sun elevation", &vxray_instance.sun_elevation_degrees,
+                                          -10.f, 90.f, "%.1f deg", 0);
+    sky_view_changed |= igSliderFloat("Sun azimuth", &vxray_instance.sun_azimuth_degrees, 0.f,
+                                      360.f, "%.1f deg", 0);
+    sky_view_changed |=
+        igSliderFloat("View altitude", &vxray_instance.view_altitude_km, 0.f, 25.f, "%.1f km", 0);
+    vxray_instance.sky_view_dirty |= sky_view_changed;
     igEnd();
     igRender();
 
@@ -2077,6 +2200,14 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
            vxray_instance.rtao_samples_per_frame <= VX_RTAO_MAX_SAMPLES_PER_FRAME);
     assert(isfinite(vxray_instance.ao_sp) && vxray_instance.ao_sp > 0.f);
     assert(isfinite(vxray_instance.ao_smin) && vxray_instance.ao_smin > 0.f);
+    assert(isfinite(vxray_instance.sun_elevation_degrees) &&
+           vxray_instance.sun_elevation_degrees >= -10.f &&
+           vxray_instance.sun_elevation_degrees <= 90.f);
+    assert(isfinite(vxray_instance.sun_azimuth_degrees) &&
+           vxray_instance.sun_azimuth_degrees >= 0.f &&
+           vxray_instance.sun_azimuth_degrees <= 360.f);
+    assert(isfinite(vxray_instance.view_altitude_km) && vxray_instance.view_altitude_km >= 0.f &&
+           vxray_instance.view_altitude_km <= 25.f);
 
     vec3s const forward = vx_camera_forward(camera);
     vec3s const world_up = {0.f, 1.f, 0.f};
@@ -2115,6 +2246,14 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         .render_height = height,
         .sample_index = 0u,
         .history_valid = (uint)(vxray_instance.rtao_history_valid && !reset_ao)};
+    float const             sun_elevation = glm_rad(vxray_instance.sun_elevation_degrees);
+    float const             sun_azimuth = glm_rad(vxray_instance.sun_azimuth_degrees);
+    float const             cos_sun_elevation = cosf(sun_elevation);
+    sky_view_uniforms const sky_view_uniform_data = {
+        .view_position = float4(0.f, 1000.f * vxray_instance.view_altitude_km, 0.f, 0.f),
+        .sun_direction = float4(cos_sun_elevation * sinf(sun_azimuth), sinf(sun_elevation),
+                                cos_sun_elevation * cosf(sun_azimuth), 0.f),
+        .sun_color = VX_SKY_SUN_COLOR};
 
     if (reset_ao)
     {
@@ -2140,6 +2279,27 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                    .size = ao_buffer_size},
             false);
         SDL_EndGPUCopyPass(copy_pass);
+    }
+
+    // Regenerate the sky-view LUT when its atmospheric view parameters change.
+
+    if (vxray_instance.sky_view_dirty)
+    {
+        SDL_GPUColorTargetInfo const sky_view_target_info = {
+            .texture = vxray_instance.sky_view_texture,
+            .clear_color = (SDL_FColor){0.f, 0.f, 0.f, 0.f},
+            .load_op = SDL_GPU_LOADOP_CLEAR,
+            .store_op = SDL_GPU_STOREOP_STORE,
+            .cycle = true};
+        SDL_GPURenderPass* const sky_view_pass =
+            SDL_BeginGPURenderPass(cmd_buffer, &sky_view_target_info, 1, 0);
+        assert(sky_view_pass);
+        SDL_BindGPUGraphicsPipeline(sky_view_pass, vxray_instance.sky_view_pipeline);
+        SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sky_view_uniform_data,
+                                       sizeof(sky_view_uniform_data));
+        SDL_DrawGPUPrimitives(sky_view_pass, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(sky_view_pass);
+        vxray_instance.sky_view_dirty = false;
     }
 
     // Trace the primary voxel rays into the G-buffer.
@@ -2276,6 +2436,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
          .sampler = vxray_instance.display_sampler},
         {.texture = vxray_instance.rtao_visibility_texture,
          .sampler = vxray_instance.display_sampler},
+        {.texture = vxray_instance.sky_view_texture, .sampler = vxray_instance.sky_view_sampler},
     };
     SDL_BindGPUFragmentSamplers(render_pass, 0, display_bindings, SDL_arraysize(display_bindings));
     SDL_GPUTexture* const display_storage_textures[] = {
@@ -2421,6 +2582,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.rtao_visibility_texture = 0;
     }
 
+    if (vxray_instance.sky_view_texture)
+    {
+        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.sky_view_texture);
+        vxray_instance.sky_view_texture = 0;
+    }
+
     if (vxray_instance.gbuffer_normal_texture)
     {
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.gbuffer_normal_texture);
@@ -2437,6 +2604,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUSampler(vxray_instance.gpu_device, vxray_instance.display_sampler);
         vxray_instance.display_sampler = 0;
+    }
+
+    if (vxray_instance.sky_view_sampler)
+    {
+        SDL_ReleaseGPUSampler(vxray_instance.gpu_device, vxray_instance.sky_view_sampler);
+        vxray_instance.sky_view_sampler = 0;
     }
 
     if (vxray_instance.gbuffer_pipeline)
@@ -2456,6 +2629,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     {
         SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.rtao_pipeline);
         vxray_instance.rtao_pipeline = 0;
+    }
+
+    if (vxray_instance.sky_view_pipeline)
+    {
+        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device, vxray_instance.sky_view_pipeline);
+        vxray_instance.sky_view_pipeline = 0;
     }
 
     if (vxray_instance.display_pipeline)

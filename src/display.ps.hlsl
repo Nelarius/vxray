@@ -8,19 +8,31 @@ struct ps_input
     float4 position : SV_Position;
 };
 
-Texture2D<float> depth_tex : register(t0, space2);
-Texture2D<float> visibility_tex : register(t1, space2);
-Texture2D<uint>  albedo_tex : register(t2, space2);
-Texture2D<uint>  normal_tex : register(t3, space2);
-Texture2D<uint>  spatial_index_tex : register(t4, space2);
+Texture2D<float>  depth_tex : register(t0, space2);
+Texture2D<float>  visibility_tex : register(t1, space2);
+Texture2D<float4> sky_view_tex : register(t2, space2);
+Texture2D<uint>   albedo_tex : register(t3, space2);
+Texture2D<uint>   normal_tex : register(t4, space2);
+Texture2D<uint>   spatial_index_tex : register(t5, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 SamplerState visibility_sampler : register(s1, space2);
+SamplerState sky_view_sampler : register(s2, space2);
 
 ConstantBuffer<display_uniforms> uniforms : register(b0, space3);
 
 static float4 const BACKGROUND_COLOR = float4(0.02, 0.025, 0.03, 1.0);
 static float4 const CACHE_FAILURE_COLOR = float4(1.0, 0.0, 1.0, 1.0);
+
+float3 aces_filmic(float3 const x)
+{
+    float const a = 2.51;
+    float const b = 0.03;
+    float const c = 2.43;
+    float const d = 0.59;
+    float const e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
 
 float4 unpack_albedo(uint const rgba)
 {
@@ -68,7 +80,13 @@ float4 main(ps_input const input) : SV_Target0
     depth_tex.GetDimensions(width, height);
     uint2 const  pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
     float2 const pixel_uv = (float2(pixel) + 0.5) / float2(width, height);
-    float const  surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
+    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_SKY_VIEW)
+    {
+        float2 const sky_uv = float2(pixel_uv.x, 1.0 - pixel_uv.y);
+        float3 const sky = sky_view_tex.SampleLevel(sky_view_sampler, sky_uv, 0.0).rgb;
+        return float4(aces_filmic(sky), 1.0);
+    }
+    float const surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL ||
