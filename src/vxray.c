@@ -58,6 +58,9 @@ static_assert((VX_PATH_TRACE_SPATIAL_HASH_TOUCH_PERIOD &
               "path-trace spatial hash touch period must be a power of two");
 static_assert(VX_PATH_TRACE_SPATIAL_HASH_TOUCH_PERIOD <= VX_PATH_TRACE_SPATIAL_HASH_MAX_CELL_AGE,
               "path-trace spatial hash entries must be touched before they expire");
+// Increase the Halton prime switch cases in shared.hlsli before increasing the bounce count.
+static_assert(VX_PATH_TRACE_BOUNCE_COUNT <= 4u,
+              "path-trace bounce count exceeds the Halton prime table");
 // The maximum fixed-point path-trace accumulation must fit in each uint payload channel.
 static_assert(VX_PATH_TRACE_SAMPLE_LIMIT <=
                   UINT32_MAX / VX_PATH_TRACE_MAX_SAMPLE_SHADING / VX_PATH_TRACE_ACCUMULATION_SCALE,
@@ -1068,7 +1071,7 @@ enum
 
 enum
 {
-    VX_RTAO_MAX_SAMPLES_PER_FRAME = 32,
+    VX_RTAO_MAX_SAMPLES_PER_FRAME = 6,
 };
 
 enum
