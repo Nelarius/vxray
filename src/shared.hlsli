@@ -103,10 +103,123 @@ float3 offset_ray(float3 const p, float3 const n)
 
 // Converts an unsigned integer into a float in [0, 1) using the 23 most significant bits as the
 // mantissa.
-template <int N>
-vector<float, N> as_normalized_float(vector<uint, N> const x)
+float as_normalized_float(uint const x) { return asfloat(0x3F800000u | (x >> 9u)) - 1.0; }
+
+template <int N> vector<float, N> as_normalized_float(vector<uint, N> const x)
 {
     return asfloat(0x3F800000u | (x >> 9u)) - 1.0;
+}
+
+uint halton_prime(uint const dimension)
+{
+    switch (dimension)
+    {
+    case 0u:
+        return 2u;
+    case 1u:
+        return 3u;
+    case 2u:
+        return 5u;
+    case 3u:
+        return 7u;
+    case 4u:
+        return 11u;
+    case 5u:
+        return 13u;
+    case 6u:
+        return 17u;
+    case 7u:
+        return 19u;
+    case 8u:
+        return 23u;
+    case 9u:
+        return 29u;
+    case 10u:
+        return 31u;
+    case 11u:
+        return 37u;
+    case 12u:
+        return 41u;
+    case 13u:
+        return 43u;
+    case 14u:
+        return 47u;
+    case 15u:
+        return 53u;
+    case 16u:
+        return 59u;
+    case 17u:
+        return 61u;
+    case 18u:
+        return 67u;
+    case 19u:
+        return 71u;
+    case 20u:
+        return 73u;
+    case 21u:
+        return 79u;
+    case 22u:
+        return 83u;
+    case 23u:
+        return 89u;
+    case 24u:
+        return 97u;
+    case 25u:
+        return 101u;
+    default:
+        return 103u;
+    }
+}
+
+float radical_inverse(uint index, uint const base)
+{
+    float const inv_base = 1.0 / (float)base;
+    float       inv_digit = inv_base;
+    float       value = 0.0;
+    while (index != 0u)
+    {
+        uint const digit = index % base;
+        value += (float)digit * inv_digit;
+        index /= base;
+        inv_digit *= inv_base;
+    }
+    return min(value, 0.99999994);
+}
+
+float rotated_halton(uint const sample_index, uint const dimension, uint const stable_stream_id)
+{
+    if (dimension >= 27u)
+    {
+        // Fallback to white noise
+        uint const hash = pcg(sample_index ^ pcg(dimension ^ pcg(stable_stream_id)));
+        return as_normalized_float(hash);
+    }
+
+    // Adds a fixed rotation per stream and dimension. It rotates a halton sequence around the unit
+    // interval.
+    uint const  rotation_hash = pcg(stable_stream_id ^ pcg(dimension + 0x9E3779B9u));
+    float const rotation = as_normalized_float(rotation_hash);
+    float const h = radical_inverse(sample_index + 1u, halton_prime(dimension));
+    return frac(h + rotation);
+}
+
+float2 halton_sample_2d(uint const frame, uint const bounce, uint const stable_stream_id)
+{
+    // Wrap around to prevent robustness issues with very large frames.
+    uint const frame_idx = frame & 8191u;
+    uint const first_dimension = 2u * bounce;
+    return float2(rotated_halton(frame_idx, first_dimension, stable_stream_id),
+                  rotated_halton(frame_idx, first_dimension + 1u, stable_stream_id));
+}
+
+float3 halton_sample_3d(uint const frame, uint const bounce, uint const stable_stream_id)
+{
+    // Wrap around to prevent robustness issues with very large frames.
+    uint const frame_idx = frame & 8191u;
+    uint const first_dimension = 3u * bounce;
+    return float3(rotated_halton(frame_idx, first_dimension, stable_stream_id),
+                  rotated_halton(frame_idx, first_dimension + 1u, stable_stream_id),
+                  rotated_halton(frame_idx, first_dimension + 2u, stable_stream_id));
 }
 
 float3 sample_cone(float2 const u, float const cos_theta_max)

@@ -57,9 +57,9 @@ main(uint2 const tid : SV_DispatchThreadID) {
 
     // Generate next direction (MIS, albertian and sun disk)
 
-    uint2 const  hash = pcg2d(uint2(path_index, pcg(uniforms.frame)));
-    float2 const u = as_normalized_float(hash);
-    bool const   sample_sun = pcg(path_index + pcg(uniforms.frame)) < 0x80000000u; // x < 0.5
+    float3 const samples = halton_sample_3d(uniforms.frame, 0u, path_index);
+    float2 const u = samples.xy;
+    bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
     float3 const local_dir =
         sample_sun ? sample_cone(u, cos_theta_max) : sample_cosine_weighted_hemisphere(u);
