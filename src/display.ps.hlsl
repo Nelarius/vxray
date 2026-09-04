@@ -67,7 +67,8 @@ float4 main(ps_input const input) : SV_Target0
         float3 const sky = sky_view_tex.SampleLevel(sky_view_sampler, sky_uv, 0.0).rgb;
         return float4(aces_filmic(sky), 1.0);
     }
-    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_PATH_TRACE)
+    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_PATH_TRACE ||
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_PATH_TRACE_SHADING)
     {
         float const depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
         if (depth >= 1.0)
@@ -84,13 +85,19 @@ float4 main(ps_input const input) : SV_Target0
 
         uint4 const  payload = path_trace_payloads[spatial_index];
         float const  sample_count = max((float)payload.w, 1.0);
-        float3 const radiance =
+        float3 const shading =
             decode_fixed_point(payload.xyz, VX_PATH_TRACE_MAX_SAMPLE_SHADING * sample_count,
                                VX_PATH_TRACE_ACCUMULATION_SCALE) /
             sample_count;
+        if (uniforms.texture_type == VX_DISPLAY_TEXTURE_PATH_TRACE_SHADING)
+        {
+            float3 const exposed_shading = uniforms.exposure * shading;
+            return float4(exposed_shading / (1.0 + exposed_shading), 1.0);
+        }
+
         float3 const albedo = unpack_albedo(albedo_tex.Load(texel).r).rgb;
 
-        return float4(aces_filmic(uniforms.exposure * radiance * albedo), 1.0);
+        return float4(aces_filmic(uniforms.exposure * shading * albedo), 1.0);
     }
     float const surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
