@@ -1,5 +1,5 @@
 #include "constants.h"
-#include "rtao.h"
+#include "path_tracer.h"
 
 #include "spatial_hash.hlsli"
 
@@ -14,17 +14,17 @@ struct ps_output
     uint checksum : SV_Target1;
 };
 
-Texture2D<float>         depth_tex : register(t0, space2);
-Texture2D<uint>          normal_tex : register(t1, space2);
-Texture2D<uint>          previous_index_tex : register(t2, space2);
-Texture2D<uint>          previous_checksum_tex : register(t3, space2);
-RWStructuredBuffer<uint> hash_checksums : register(u4, space2);
-RWStructuredBuffer<uint> hash_payloads : register(u5, space2);
-RWStructuredBuffer<uint> hash_frames : register(u6, space2);
+Texture2D<float>          depth_tex : register(t0, space2);
+Texture2D<uint>           normal_tex : register(t1, space2);
+Texture2D<uint>           previous_index_tex : register(t2, space2);
+Texture2D<uint>           previous_checksum_tex : register(t3, space2);
+RWStructuredBuffer<uint>  hash_checksums : register(u4, space2);
+RWStructuredBuffer<uint4> hash_payloads : register(u5, space2);
+RWStructuredBuffer<uint>  hash_frames : register(u6, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 
-ConstantBuffer<rtao_uniforms> uniforms : register(b0, space3);
+ConstantBuffer<path_tracer_index_uniforms> uniforms : register(b0, space3);
 
 ps_output miss()
 {
@@ -55,13 +55,14 @@ ps_output main(ps_input const input)
     spatial_hash_key const key = make_spatial_hash_key(face_position, normal, cell_size);
     uint                   index = spatial_hash_find_reprojected_index(
         face_position, key, uint2(width, height), uniforms.history_valid,
-        uniforms.previous_view_projection, uniforms.frame_index, VX_RTAO_SPATIAL_HASH_TOUCH_PERIOD,
+        uniforms.previous_view_projection, uniforms.frame, VX_PATH_TRACE_SPATIAL_HASH_TOUCH_PERIOD,
         previous_index_tex, previous_checksum_tex, hash_frames);
     if (index == VX_SPATIAL_HASH_INVALID_INDEX)
     {
-        index = spatial_hash_find_or_insert(
-            key, uniforms.frame_index, VX_RTAO_SPATIAL_HASH_MASK, VX_RTAO_SPATIAL_HASH_PROBE_COUNT,
-            VX_RTAO_SPATIAL_HASH_MAX_CELL_AGE, hash_checksums, hash_payloads, hash_frames);
+        index = spatial_hash_find_or_insert(key, uniforms.frame, VX_PATH_TRACE_SPATIAL_HASH_MASK,
+                                            VX_PATH_TRACE_SPATIAL_HASH_PROBE_COUNT,
+                                            VX_PATH_TRACE_SPATIAL_HASH_MAX_CELL_AGE, hash_checksums,
+                                            hash_payloads, hash_frames);
     }
 
     ps_output output;

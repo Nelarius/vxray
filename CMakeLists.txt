@@ -30,8 +30,14 @@ set(VXRAY_SHADER_SOURCES
         display.ps.hlsl
         fullscreen.vs.hlsl
         gbuffer.ps.hlsl
-        rtao_index.ps.hlsl
+        path_tracer_accumulate.cs.hlsl
+        path_tracer_extend.cs.hlsl
+        path_tracer_generate.cs.hlsl
+        path_tracer_index.ps.hlsl
+        path_tracer_prepare_accumulate.cs.hlsl
+        path_tracer_prepare_extend.cs.hlsl
         rtao.ps.hlsl
+        rtao_index.ps.hlsl
         sky_view.ps.hlsl)
 list(TRANSFORM VXRAY_SHADER_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 
@@ -54,6 +60,7 @@ add_custom_command(
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/constants.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/display.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/gbuffer.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/path_tracer.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/rtao.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/sky.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/spatial_hash.hlsli
@@ -78,28 +85,35 @@ target_compile_options(
                 $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/EHsc->)
 
 set(VXRAY_SOURCES
+        aadf_global.cs.hlsl
+        aadf_local.cs.hlsl
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.c>
         $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>:compiled_metal_shaders.h>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.c>
         $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},Darwin>>:compiled_spirv_shaders.h>
         constants.h
-        aadf_global.cs.hlsl
-        aadf_local.cs.hlsl
-        integrations/cvox.cc
-        integrations/cvox.h
         display.h
         display.ps.hlsl
         fullscreen.vs.hlsl
         gbuffer.h
         gbuffer.ps.hlsl
         hlsl_shim.h
+        integrations/cvox.cc
+        integrations/cvox.h
+        path_tracer.h
+        path_tracer_accumulate.cs.hlsl
+        path_tracer_extend.cs.hlsl
+        path_tracer_generate.cs.hlsl
+        path_tracer_index.ps.hlsl
+        path_tracer_prepare_accumulate.cs.hlsl
+        path_tracer_prepare_extend.cs.hlsl
         rtao.h
-        rtao_index.ps.hlsl
         rtao.ps.hlsl
+        rtao_index.ps.hlsl
+        shared.hlsli
         sky.h
         sky_view.ps.hlsl
         spatial_hash.hlsli
-        shared.hlsli
         vxray.c)
 list(TRANSFORM VXRAY_SOURCES PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 

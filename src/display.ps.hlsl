@@ -1,5 +1,6 @@
 #include "constants.h"
 #include "display.h"
+#include "path_tracer.h"
 
 #include "spatial_hash.hlsli"
 
@@ -8,12 +9,13 @@ struct ps_input
     float4 position : SV_Position;
 };
 
-Texture2D<float>  depth_tex : register(t0, space2);
-Texture2D<float>  visibility_tex : register(t1, space2);
-Texture2D<float4> sky_view_tex : register(t2, space2);
-Texture2D<uint>   albedo_tex : register(t3, space2);
-Texture2D<uint>   normal_tex : register(t4, space2);
-Texture2D<uint>   spatial_index_tex : register(t5, space2);
+Texture2D<float>        depth_tex : register(t0, space2);
+Texture2D<float>        visibility_tex : register(t1, space2);
+Texture2D<float4>       sky_view_tex : register(t2, space2);
+Texture2D<uint>         albedo_tex : register(t3, space2);
+Texture2D<uint>         normal_tex : register(t4, space2);
+Texture2D<uint>         spatial_index_tex : register(t5, space2);
+StructuredBuffer<uint4> path_trace_payloads : register(t6, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 SamplerState visibility_sampler : register(s1, space2);
@@ -32,27 +34,6 @@ float3 aces_filmic(float3 const x)
     float const d = 0.59;
     float const e = 0.14;
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
-}
-
-float4 unpack_albedo(uint const rgba)
-{
-    float const r = (float)(rgba & 255u) / 255.0;
-    float const g = (float)((rgba >> 8u) & 255u) / 255.0;
-    float const b = (float)((rgba >> 16u) & 255u) / 255.0;
-    float const a = (float)((rgba >> 24u) & 255u) / 255.0;
-    return float4(pow(float3(r, g, b), 2.2), a);
-}
-
-float4 visualize_depth(float const depth)
-{
-    if (depth >= 1.0)
-    {
-        return BACKGROUND_COLOR;
-    }
-
-    float const linear_depth = linear_view_depth(depth, uniforms.near_plane, uniforms.far_plane);
-    float const shade = 1.0 - saturate(linear_depth / (2.0 * (float)uniforms.grid_ext));
-    return float4(shade, shade, shade, 1.0);
 }
 
 float3 cell_size_color(float const cell_size, float const smin)
@@ -85,6 +66,31 @@ float4 main(ps_input const input) : SV_Target0
         float2 const sky_uv = float2(pixel_uv.x, 1.0 - pixel_uv.y);
         float3 const sky = sky_view_tex.SampleLevel(sky_view_sampler, sky_uv, 0.0).rgb;
         return float4(aces_filmic(sky), 1.0);
+    }
+    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_PATH_TRACE)
+    {
+        float const depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
+        if (depth >= 1.0)
+        {
+            return BACKGROUND_COLOR;
+        }
+
+        int3 const texel = int3(pixel, 0);
+        uint const spatial_index = spatial_index_tex.Load(texel).r;
+        if (spatial_index == VX_SPATIAL_HASH_INVALID_INDEX)
+        {
+            return CACHE_FAILURE_COLOR;
+        }
+
+        uint4 const  payload = path_trace_payloads[spatial_index];
+        float const  sample_count = max((float)payload.w, 1.0);
+        float3 const radiance =
+            decode_fixed_point(payload.xyz, VX_PATH_TRACE_MAX_SAMPLE_SHADING * sample_count,
+                               VX_PATH_TRACE_ACCUMULATION_SCALE) /
+            sample_count;
+        float3 const albedo = unpack_albedo(albedo_tex.Load(texel).r).rgb;
+
+        return float4(aces_filmic(uniforms.exposure * radiance * albedo), 1.0);
     }
     float const surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||
@@ -133,11 +139,6 @@ float4 main(ps_input const input) : SV_Target0
 
         float4 const color = unpack_albedo(albedo_tex.Load(texel).r);
         return float4(color.rgb * visibility, color.a);
-    }
-
-    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_SURFACE_DEPTH)
-    {
-        return visualize_depth(surface_depth);
     }
 
     return BACKGROUND_COLOR;

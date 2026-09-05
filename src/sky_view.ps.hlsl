@@ -19,7 +19,7 @@ float4 main(ps_input const input) : SV_Target0
         ray_length = min(ray_length, planet_hit.x);
     }
 
-    float3 const radiance = sky_integrate_scattering(
+    sky_radiance_and_transmittance const sky = sky_integrate_scattering(
         ray_start, ray_dir, ray_length, uniforms.sun_direction.xyz, uniforms.sun_color.rgb);
-    return float4(radiance, 1.0);
+    return float4(sky.radiance, 1.0);
 }
