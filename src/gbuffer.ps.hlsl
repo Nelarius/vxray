@@ -107,23 +107,35 @@ float3 aadf_exit_plane(int16_t3 const coord, int16_t const cell_ext, uint const 
 uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir, uint const entry_record)
 {
     float3 const inv_dir = 1.0 / (ray_dir + (float3)(ray_dir == 0.0) * 1e-30);
-    float3       p0 = (float3)0.0;
-    float3       p1 = (float3)uniforms.grid_ext;
-    if (entry_record != 0u)
+    float3       start = (float3)0.0;
+    float3       entry_mask = (float3)0.0;
+    // The high bit marks raster face borders; use the original scene start there.
+    if (entry_record != 0u && (entry_record & 0x80000000u) == 0u)
     {
-        uint const packed = entry_record - 1u;
-        p0 = float3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u) * VX_BRICK_EXT;
-        p1 = p0 + VX_BRICK_EXT;
+        uint const  packed = entry_record - 1u;
+        uint const  face = packed >> 24u;
+        uint const  axis = face >> 1u;
+        uint const  brick = (packed >> (axis * 8u)) & 255u;
+        float const plane = (float)((brick + (face & 1u)) * VX_BRICK_EXT);
+        float const t = (plane - ray_origin[axis]) * inv_dir[axis];
+        // Use the exposed face, not an internal AABB side the ray may cross at a seam.
+        // The reconstructed ray can enter the neighboring brick through this same plane.
+        start = ray_origin + t * ray_dir;
+        start[axis] = plane;
+        entry_mask = float3(axis == uint3(0u, 1u, 2u));
     }
-    float  tmin;
-    float  tmax;
-    float3 entry_mask;
-    if (!ray_box_test(ray_origin, inv_dir, p0, p1, tmin, tmax, entry_mask))
+    else
     {
-        return VX_NO_CELL;
+        float tmin;
+        float tmax;
+        if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)uniforms.grid_ext, tmin, tmax,
+                          entry_mask))
+        {
+            return VX_NO_CELL;
+        }
+        start = ray_origin + tmin * ray_dir;
     }
 
-    float3 const start = ray_origin + tmin * ray_dir;
     int16_t3     ipos = int16_t3(floor(start + entry_mask * sign(ray_dir) * 0.5));
     float3       local_pos = start - float3(ipos);
     float3 const entry_weights = entry_mask * abs(ray_dir);
