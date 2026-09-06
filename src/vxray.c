@@ -1100,7 +1100,6 @@ typedef struct vxray
     vx_input  input;
     int       shading_mode;
     int       display_texture;
-    bool      use_brick_prepass;
     int       exposure_stop;
     float     rtao_radius;
     int       rtao_samples_per_frame;
@@ -1643,7 +1642,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
 
-    vxray_instance.use_brick_prepass = true;
     vxray_instance.rtao_radius = 8.f;
     vxray_instance.rtao_samples_per_frame = 1;
     vxray_instance.rtao_sp = 10.f;
@@ -2832,14 +2830,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                          VX_DISPLAY_TEXTURE_CELL_SIZE);
     igRadioButton_IntPtr("Spatial index", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_SPATIAL_INDEX);
-    bool const prepass_changed = igCheckbox("Brick prepass", &vxray_instance.use_brick_prepass);
-    vxray_instance.rtao_spatial_hash_dirty |= prepass_changed;
-    vxray_instance.path_trace_spatial_hash_dirty |= prepass_changed;
-    if (prepass_changed)
-    {
-        vxray_instance.rtao_history_valid = false;
-        vxray_instance.path_trace_history_valid = false;
-    }
     bool invalidate_ao = false;
     if (vxray_instance.shading_mode == VX_SHADING_RTAO)
     {
@@ -2956,8 +2946,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
         .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
         .view_projection = view_projection_data,
-        .grid_ext = vxray_instance.grid_ext,
-        .use_brick_prepass = (uint)vxray_instance.use_brick_prepass};
+        .grid_ext = vxray_instance.grid_ext};
     bool const render_rtao = vxray_instance.shading_mode == VX_SHADING_RTAO;
     bool const reset_ao = render_rtao && (vxray_instance.rtao_spatial_hash_dirty || invalidate_ao);
     bool const reset_path_trace_hash = !render_rtao && vxray_instance.path_trace_spatial_hash_dirty;

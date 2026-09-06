@@ -49,7 +49,7 @@ vs_output main(uint const vertex_id : SV_VertexID, uint const instance_id : SV_I
 
     uint const  face_data = visible_faces[instance_id];
     uint3 const brick =
-        uint3(face_data & 0xffu, (face_data >> 8u) & 0xffu, (face_data >> 16u) & 0xffu);
+        uint3(face_data & 0xFFu, (face_data >> 8u) & 0xFFu, (face_data >> 16u) & 0xFFu);
     uint const   face = (face_data >> 24u) & 0x7u;
     float3 const world_position =
         float3(brick * VX_BRICK_EXT) + face_corner(face, corners[corner_indices[vertex_id]]);
