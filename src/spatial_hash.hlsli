@@ -1,28 +1,6 @@
 #pragma once
 
-#include "rtao.h"
-
 #include "shared.hlsli"
-
-uint pcg(uint v)
-{
-    uint const state = v * 747796405u + 2891336453u;
-    uint const word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-uint xxhash32(uint p)
-{
-    uint const prime32_2 = 2246822519u;
-    uint const prime32_3 = 3266489917u;
-    uint const prime32_4 = 668265263u;
-    uint const prime32_5 = 374761393u;
-    uint       h32 = p + prime32_5;
-    h32 = prime32_4 * ((h32 << 17u) | (h32 >> 15u));
-    h32 = prime32_2 * (h32 ^ (h32 >> 15u));
-    h32 = prime32_3 * (h32 ^ (h32 >> 13u));
-    return h32 ^ (h32 >> 16u);
-}
 
 float linear_view_depth(float const device_depth, float const near_plane, float const far_plane)
 {
@@ -74,4 +52,125 @@ spatial_hash_key make_spatial_hash_key(float3 const position, float3 const norma
     result.hash = hash;
     result.checksum = checksum;
     return result;
+}
+
+static uint const VX_SPATIAL_HASH_INVALID_INDEX = 0xFFFFFFFFu;
+
+void spatial_hash_reset_payload(RWStructuredBuffer<uint> hash_payloads, uint const index)
+{
+    uint ex;
+    InterlockedExchange(hash_payloads[index], 0u, ex);
+}
+
+void spatial_hash_reset_payload(RWStructuredBuffer<uint4> hash_payloads, uint const index)
+{
+    uint ex;
+    InterlockedExchange(hash_payloads[index].x, 0u, ex);
+    InterlockedExchange(hash_payloads[index].y, 0u, ex);
+    InterlockedExchange(hash_payloads[index].z, 0u, ex);
+    InterlockedExchange(hash_payloads[index].w, 0u, ex);
+}
+
+template <typename Payload>
+uint spatial_hash_find_or_insert(spatial_hash_key const key, uint const frame, uint const mask,
+                                 uint const probe_count, uint const max_cell_age,
+                                 RWStructuredBuffer<uint>    hash_checksums,
+                                 RWStructuredBuffer<Payload> hash_payloads,
+                                 RWStructuredBuffer<uint>    hash_frames)
+{
+    uint index = key.hash & mask;
+    for (uint probe = 0u; probe < probe_count; ++probe)
+    {
+        uint ex_checksum;
+        InterlockedCompareExchange(hash_checksums[index], 0u, key.checksum, ex_checksum);
+
+        uint ex_frame;
+        if (ex_checksum == 0u || ex_checksum == key.checksum)
+        {
+            InterlockedExchange(hash_frames[index], frame, ex_frame);
+            return index;
+        }
+        ex_frame = hash_frames[index];
+        if (frame - ex_frame > max_cell_age)
+        {
+            uint ex;
+            InterlockedExchange(hash_checksums[index], key.checksum, ex);
+            spatial_hash_reset_payload(hash_payloads, index);
+            InterlockedExchange(hash_frames[index], frame, ex_frame);
+            return index;
+        }
+
+        index = (index + 1u) & mask;
+    }
+
+    return VX_SPATIAL_HASH_INVALID_INDEX;
+}
+
+void spatial_hash_touch_reprojected_entry(uint const index, uint const hash, uint const frame,
+                                          uint const               touch_period,
+                                          RWStructuredBuffer<uint> hash_frames)
+{
+    uint const touch_mask = touch_period - 1u;
+    // NOTE: scramble frame update phase using hash to spread updates
+    if ((frame & touch_mask) == (hash & touch_mask))
+    {
+        uint ex_frame;
+        InterlockedExchange(hash_frames[index], frame, ex_frame);
+    }
+}
+
+uint spatial_hash_find_reprojected_index(float3 const face_position, spatial_hash_key const key,
+                                         uint2 const dimensions, uint const history_valid,
+                                         float4x4 const previous_view_projection, uint const frame,
+                                         uint const               touch_period,
+                                         Texture2D<uint>          previous_index_tex,
+                                         Texture2D<uint>          previous_checksum_tex,
+                                         RWStructuredBuffer<uint> hash_frames)
+{
+    if (history_valid == 0u)
+    {
+        return VX_SPATIAL_HASH_INVALID_INDEX;
+    }
+
+    float4 const previous_clip = mul(previous_view_projection, float4(face_position, 1.0));
+    if (previous_clip.w <= 0.0)
+    {
+        return VX_SPATIAL_HASH_INVALID_INDEX;
+    }
+
+    float2 const previous_ndc = previous_clip.xy / previous_clip.w;
+    float2 const previous_uv = previous_ndc * float2(0.5, -0.5) + 0.5;
+    if (any(previous_uv < 0.0) || any(previous_uv >= 1.0))
+    {
+        return VX_SPATIAL_HASH_INVALID_INDEX;
+    }
+
+    int2 const base_pixel = int2(floor(previous_uv * float2(dimensions) - 0.5));
+    for (int y = 0; y < 2; ++y)
+    {
+        for (int x = 0; x < 2; ++x)
+        {
+            int2 const previous_pixel = base_pixel + int2(x, y);
+            if (any(previous_pixel < 0) || any(previous_pixel >= int2(dimensions)))
+            {
+                continue;
+            }
+
+            int3 const texel = int3(previous_pixel, 0);
+            if (previous_checksum_tex.Load(texel).r != key.checksum)
+            {
+                continue;
+            }
+
+            uint const index = previous_index_tex.Load(texel).r;
+            if (index != VX_SPATIAL_HASH_INVALID_INDEX)
+            {
+                spatial_hash_touch_reprojected_entry(index, key.hash, frame, touch_period,
+                                                     hash_frames);
+                return index;
+            }
+        }
+    }
+
+    return VX_SPATIAL_HASH_INVALID_INDEX;
 }

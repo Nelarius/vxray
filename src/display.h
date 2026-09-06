@@ -4,11 +4,11 @@
 
 #define VX_DISPLAY_TEXTURE_ALBEDO 0
 #define VX_DISPLAY_TEXTURE_NORMAL 1
-#define VX_DISPLAY_TEXTURE_SURFACE_DEPTH 2
-#define VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY 3
-#define VX_DISPLAY_TEXTURE_CELL_SIZE 4
-#define VX_DISPLAY_TEXTURE_SPATIAL_INDEX 5
-#define VX_DISPLAY_TEXTURE_SKY_VIEW 6
+#define VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY 2
+#define VX_DISPLAY_TEXTURE_CELL_SIZE 3
+#define VX_DISPLAY_TEXTURE_SPATIAL_INDEX 4
+#define VX_DISPLAY_TEXTURE_SKY_VIEW 5
+#define VX_DISPLAY_TEXTURE_PATH_TRACE 6
 
 typedef struct display_uniforms
 {
@@ -20,4 +20,8 @@ typedef struct display_uniforms
     float smin;
     float vertical_fov;
     uint  render_height;
+    float exposure;
+    uint  pad1;
+    uint  pad2;
+    uint  pad3;
 } display_uniforms;

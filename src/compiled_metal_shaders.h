@@ -20,11 +20,29 @@ extern size_t const FULLSCREEN_VS_SIZE;
 extern uint8_t const GBUFFER_PS_BYTES[];
 extern size_t const GBUFFER_PS_SIZE;
 
-extern uint8_t const RTAO_INDEX_PS_BYTES[];
-extern size_t const RTAO_INDEX_PS_SIZE;
+extern uint8_t const PATH_TRACER_ACCUMULATE_CS_BYTES[];
+extern size_t const PATH_TRACER_ACCUMULATE_CS_SIZE;
+
+extern uint8_t const PATH_TRACER_EXTEND_CS_BYTES[];
+extern size_t const PATH_TRACER_EXTEND_CS_SIZE;
+
+extern uint8_t const PATH_TRACER_GENERATE_CS_BYTES[];
+extern size_t const PATH_TRACER_GENERATE_CS_SIZE;
+
+extern uint8_t const PATH_TRACER_INDEX_PS_BYTES[];
+extern size_t const PATH_TRACER_INDEX_PS_SIZE;
+
+extern uint8_t const PATH_TRACER_PREPARE_ACCUMULATE_CS_BYTES[];
+extern size_t const PATH_TRACER_PREPARE_ACCUMULATE_CS_SIZE;
+
+extern uint8_t const PATH_TRACER_PREPARE_EXTEND_CS_BYTES[];
+extern size_t const PATH_TRACER_PREPARE_EXTEND_CS_SIZE;
 
 extern uint8_t const RTAO_PS_BYTES[];
 extern size_t const RTAO_PS_SIZE;
+
+extern uint8_t const RTAO_INDEX_PS_BYTES[];
+extern size_t const RTAO_INDEX_PS_SIZE;
 
 extern uint8_t const SKY_VIEW_PS_BYTES[];
 extern size_t const SKY_VIEW_PS_SIZE;

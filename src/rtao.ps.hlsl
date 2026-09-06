@@ -19,24 +19,6 @@ SamplerState depth_sampler : register(s0, space2);
 
 ConstantBuffer<rtao_uniforms> uniforms : register(b0, space3);
 
-uint2 pcg2d(uint2 v)
-{
-    // Hash functions for GPU rendering:
-    // https://www.shadertoy.com/view/XlGcRh
-    v = v * 1664525u + 1013904223u;
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    v ^= v >> 16u;
-    v.x += v.y * 1664525u;
-    v.y += v.x * 1664525u;
-    v ^= v >> 16u;
-    return v;
-}
-
-// Converts an unsigned integer into a float in the range [0, 1) by using the 23 most significant
-// bits as the mantissa.
-float2 as_normalized_float(uint2 x) { return asfloat(0x3F800000u | (x >> 9u)) - 1.0f; }
-
 float2 r2_sequence(float const n)
 {
     // 2-dimensional golden ratio additive recurrence sequence
@@ -44,26 +26,6 @@ float2 r2_sequence(float const n)
     float const a1 = 0.7548777f;
     float const a2 = 0.5698403f;
     return frac(float2(n * a1, n * a2));
-}
-
-float3 sample_cosine_weighted_hemisphere(float2 const u)
-{
-    float const phi = 2.0f * VX_PI_F * u.x;
-    float const sin_theta = sqrt(u.y);
-    return float3(cos(phi) * sin_theta, sin(phi) * sin_theta, sqrt(1.f - u.y));
-}
-
-float3 orient_sample_direction(float3 const v, float3 const n)
-{
-    if (n.x != 0.0)
-    {
-        return float3(v.z * n.x, v.x, v.y);
-    }
-    if (n.y != 0.0)
-    {
-        return float3(v.x, v.z * n.y, v.y);
-    }
-    return float3(v.x, v.y, v.z * n.z);
 }
 
 uint mask_linear_idx(int16_t3 const coord)
@@ -153,7 +115,7 @@ float main(ps_input const input) : SV_Target0
         reconstruct_position(uniforms.inverse_view_projection, uv, depth, normal);
     uint const payload = hash_payloads[index];
     uint const sample_count = payload & 0xFFFFu;
-    if (sample_count >= VX_AO_SAMPLE_LIMIT)
+    if (sample_count >= VX_RTAO_SAMPLE_LIMIT)
     {
         return 1.0 - (float)(payload >> 16u) / (float)sample_count;
     }
@@ -163,8 +125,9 @@ float main(ps_input const input) : SV_Target0
         uint2(uniforms.frame_index * 0x9E3779B9u, pcg(uniforms.frame_index ^ 0xA511E9B3u));
     float2 const pixel_noise = as_normalized_float(pcg2d(pixel ^ frame_seed));
     float2 const u = frac(pixel_noise + r2_sequence((float)uniforms.sample_index));
-    float3 const direction = orient_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
-    uint const   occlusion = sparse_ray_march(pos, direction, uniforms.rtao_radius);
+    float3 const direction =
+        orient_axis_aligned_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
+    uint const occlusion = sparse_ray_march(pos, direction, uniforms.rtao_radius);
 
     uint ex_occlusion;
     InterlockedAdd(hash_payloads[index], (occlusion << 16u) | 1u, ex_occlusion);
