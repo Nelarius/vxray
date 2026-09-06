@@ -15,7 +15,8 @@ Texture2D<float4>       sky_view_tex : register(t2, space2);
 Texture2D<uint>         albedo_tex : register(t3, space2);
 Texture2D<uint>         normal_tex : register(t4, space2);
 Texture2D<uint>         spatial_index_tex : register(t5, space2);
-StructuredBuffer<uint4> path_trace_payloads : register(t6, space2);
+Texture2D<uint>         entry_bricks : register(t6, space2);
+StructuredBuffer<uint4> path_trace_payloads : register(t7, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 SamplerState visibility_sampler : register(s1, space2);
@@ -61,6 +62,19 @@ float4 main(ps_input const input) : SV_Target0
     depth_tex.GetDimensions(width, height);
     uint2 const  pixel = min(uint2(input.position.xy), uint2(width - 1u, height - 1u));
     float2 const pixel_uv = (float2(pixel) + 0.5) / float2(width, height);
+    if (uniforms.texture_type == VX_DISPLAY_TEXTURE_BRICK_COORDINATES)
+    {
+        uint const record = entry_bricks.Load(int3(pixel, 0)).r;
+        if (record == 0u)
+        {
+            return BACKGROUND_COLOR;
+        }
+        uint const   packed = record - 1u;
+        uint3 const  brick = uint3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u);
+        float3 const coord = (float3(brick) + 0.5) / (float)(uniforms.grid_ext / VX_BRICK_EXT);
+        float const  shade = ((brick.x ^ brick.y ^ brick.z) & 1u) != 0u ? 1.0 : 0.4;
+        return float4((0.15 + 0.85 * coord) * shade, 1.0);
+    }
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_SKY_VIEW)
     {
         float2 const sky_uv = float2(pixel_uv.x, 1.0 - pixel_uv.y);
