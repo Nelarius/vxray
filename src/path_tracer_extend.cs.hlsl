@@ -185,12 +185,10 @@ main(uint const thread_id : SV_DispatchThreadID) {
         return;
     }
 
-    path_tracer_ray const  ray = input_ray_buffer[thread_id];
-    float3 const           ray_origin = ray.origin_and_path_index.xyz;
-    float3 const           ray_dir = ray.direction;
-    uint const             path_index = asuint(ray.origin_and_path_index.w);
-    path_tracer_path_state state = path_state_buffer[path_index];
-    float3                 throughput = state.throughput_and_spatial_index.xyz;
+    path_tracer_ray const ray = input_ray_buffer[thread_id];
+    float3 const          ray_origin = ray.origin_and_path_index.xyz;
+    float3 const          ray_dir = ray.direction;
+    uint const            path_index = asuint(ray.origin_and_path_index.w);
 
     uint const packed_cell = sparse_ray_march(ray_origin, ray_dir);
 
@@ -198,8 +196,9 @@ main(uint const thread_id : SV_DispatchThreadID) {
 
     if (packed_cell == VX_NO_CELL)
     {
-        state.radiance.xyz +=
-            throughput * sky_radiance(ray_dir, uniforms.transmitted_sun_color.rgb);
+        path_tracer_path_state state = path_state_buffer[path_index];
+        state.radiance.xyz += state.throughput_and_spatial_index.xyz *
+                              sky_radiance(ray_dir, uniforms.transmitted_sun_color.rgb);
         path_state_buffer[path_index] = state;
         return;
     }
@@ -235,6 +234,8 @@ main(uint const thread_id : SV_DispatchThreadID) {
     float const pdf =
         0.5 * (pdf_cone(dot(uniforms.sun_direction.xyz, next_ray_dir), cos_theta_max) +
                pdf_cosine_weighted_hemisphere(n_dot_l));
+    path_tracer_path_state state = path_state_buffer[path_index];
+    float3                 throughput = state.throughput_and_spatial_index.xyz;
     throughput *= albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6));
     state.throughput_and_spatial_index.xyz = throughput;
     path_state_buffer[path_index] = state;
