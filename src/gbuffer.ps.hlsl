@@ -109,8 +109,7 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir, uint const 
     float3 const inv_dir = 1.0 / (ray_dir + (float3)(ray_dir == 0.0) * 1e-30);
     float3       start = (float3)0.0;
     float3       entry_mask = (float3)0.0;
-    // The high bit marks raster face borders. Use the accelerated start when the border bit is
-    // clear.
+    // The high bit marks raster face borders; use the original scene start there.
     if (entry_record != 0u && (entry_record & 0x80000000u) == 0u)
     {
         uint const  packed = entry_record - 1u;
@@ -125,7 +124,6 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir, uint const 
         start[axis] = plane;
         entry_mask = float3(axis == uint3(0u, 1u, 2u));
     }
-    // Use the full scene AABB otherwise.
     else
     {
         float tmin;
@@ -227,20 +225,23 @@ ps_output miss()
 
 ps_output main(ps_input const input)
 {
-    float3 const camera_pos = uniforms.camera_pos.xyz;
-    bool         camera_inside = false;
-    if (all(camera_pos >= 0.0) && all(camera_pos < (float)uniforms.grid_ext))
-    {
-        camera_inside = brick_occupied(int16_t3(camera_pos / VX_BRICK_EXT));
-    }
-    // Exposed entry faces cannot seed rays originating inside an occupied brick.
     uint entry_record = 0u;
-    if (!camera_inside)
+    if (uniforms.use_brick_prepass != 0u)
     {
-        entry_record = entry_bricks.Load(int3(input.position.xy, 0)).r;
-        if (entry_record == 0u)
+        float3 const camera_pos = uniforms.camera_pos.xyz;
+        bool         camera_inside = false;
+        if (all(camera_pos >= 0.0) && all(camera_pos < (float)uniforms.grid_ext))
         {
-            return miss();
+            camera_inside = brick_occupied(int16_t3(camera_pos / VX_BRICK_EXT));
+        }
+        // Exposed entry faces cannot seed rays originating inside an occupied brick.
+        if (!camera_inside)
+        {
+            entry_record = entry_bricks.Load(int3(input.position.xy, 0)).r;
+            if (entry_record == 0u)
+            {
+                return miss();
+            }
         }
     }
 
