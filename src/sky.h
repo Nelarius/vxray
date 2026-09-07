@@ -33,73 +33,66 @@ typedef struct sky_radiance_and_transmittance
 #if defined(__HLSL_VERSION)
 
 #define VX_SKY_INLINE
-#define sky_float3_add(a, b) ((a) + (b))
-#define sky_float3_mul(a, b) ((a) * (b))
-#define sky_float3_scale(a, s) ((a) * (s))
-#define sky_float3_sub(a, b) ((a) - (b))
-#define sky_float3_dot(a, b) dot((a), (b))
-#define sky_float3_length(a) length(a)
-#define sky_float3_exp_neg(a) exp(-(a))
-#define sky_exp_neg(a) exp(-(a))
-#define sky_sqrt(a) sqrt(a)
-#define sky_max(a, b) max((a), (b))
-#define sky_abs(a) abs(a)
+#define float3_add(a, b) ((a) + (b))
+#define float3_mul(a, b) ((a) * (b))
+#define float3_scale(a, s) ((a) * (s))
+#define float3_sub(a, b) ((a) - (b))
+#define float3_dot(a, b) dot((a), (b))
+#define float3_length(a) length(a)
+#define float3_exp_neg(a) exp(-(a))
+#define fmax(a, b) max((a), (b))
+#define fabs(a) abs(a)
 
 #else
 
-#include <math.h>
+#include <tgmath.h>
 
 #define VX_SKY_INLINE static inline
 
-static inline float3 sky_float3_add(float3 const a, float3 const b)
+static inline float3 float3_add(float3 const a, float3 const b)
 {
     return float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-static inline float3 sky_float3_mul(float3 const a, float3 const b)
+static inline float3 float3_mul(float3 const a, float3 const b)
 {
     return float3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
 
-static inline float3 sky_float3_scale(float3 const a, float const s)
+static inline float3 float3_scale(float3 const a, float const s)
 {
     return float3(a.x * s, a.y * s, a.z * s);
 }
 
-static inline float3 sky_float3_sub(float3 const a, float3 const b)
+static inline float3 float3_sub(float3 const a, float3 const b)
 {
     return float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-static inline float sky_float3_dot(float3 const a, float3 const b)
+static inline float float3_dot(float3 const a, float3 const b)
 {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-static inline float sky_float3_length(float3 const a) { return sqrtf(sky_float3_dot(a, a)); }
+static inline float float3_length(float3 const a) { return sqrtf(float3_dot(a, a)); }
 
-static inline float3 sky_float3_exp_neg(float3 const a)
+static inline float3 float3_exp_neg(float3 const a)
 {
     return float3(expf(-a.x), expf(-a.y), expf(-a.z));
 }
-
-static inline float sky_exp_neg(float const a) { return expf(-a); }
-static inline float sky_sqrt(float const a) { return sqrtf(a); }
-static inline float sky_max(float const a, float const b) { return fmaxf(a, b); }
-static inline float sky_abs(float const a) { return fabsf(a); }
 
 #endif
 
 VX_SKY_INLINE float2 sky_sphere_intersection(float3 const ray_start, float3 const ray_dir,
                                              float3 const sphere_center, float const sphere_radius)
 {
-    float3 const oc = sky_float3_sub(ray_start, sphere_center);
-    float const  a = sky_float3_dot(ray_dir, oc);
-    float const  b = sky_float3_dot(oc, oc) - sphere_radius * sphere_radius;
+    float3 const oc = float3_sub(ray_start, sphere_center);
+    float const  a = float3_dot(ray_dir, oc);
+    float const  b = float3_dot(oc, oc) - sphere_radius * sphere_radius;
     float const  discriminant = a * a - b;
     if (discriminant > 0.f)
     {
-        float const x = sky_sqrt(discriminant);
+        float const x = sqrt(discriminant);
         return float2(-a - x, -a + x);
     }
     return float2(-1.f, -1.f);
@@ -118,14 +111,14 @@ VX_SKY_INLINE float2 sky_planet_intersection(float3 const ray_start, float3 cons
 
 VX_SKY_INLINE float sky_atmosphere_height(float3 const position)
 {
-    return sky_float3_length(sky_float3_sub(position, VX_SKY_PLANET_CENTER)) - VX_SKY_PLANET_RADIUS;
+    return float3_length(float3_sub(position, VX_SKY_PLANET_CENTER)) - VX_SKY_PLANET_RADIUS;
 }
 
 VX_SKY_INLINE float3 sky_atmosphere_density(float const height)
 {
-    float const rayleigh = sky_exp_neg(sky_max(0.f, height / VX_SKY_RAYLEIGH_HEIGHT));
-    float const mie = sky_exp_neg(sky_max(0.f, height / VX_SKY_MIE_HEIGHT));
-    float const ozone = sky_max(0.f, 1.f - sky_abs(height - 25000.f) / 15000.f);
+    float const rayleigh = exp(-fmax(0.f, height / VX_SKY_RAYLEIGH_HEIGHT));
+    float const mie = exp(-fmax(0.f, height / VX_SKY_MIE_HEIGHT));
+    float const ozone = fmax(0.f, 1.f - fabs(height - 25000.f) / 15000.f);
     return float3(rayleigh, mie, ozone);
 }
 
@@ -139,21 +132,20 @@ VX_SKY_INLINE float3 sky_integrate_optical_depth(float3 const ray_start, float3 
     for (int i = 0; i < sample_count; ++i)
     {
         float3 const p =
-            sky_float3_add(ray_start, sky_float3_scale(ray_dir, ((float)i + 0.5f) * step_size));
-        optical_depth = sky_float3_add(
-            optical_depth,
-            sky_float3_scale(sky_atmosphere_density(sky_atmosphere_height(p)), step_size));
+            float3_add(ray_start, float3_scale(ray_dir, ((float)i + 0.5f) * step_size));
+        optical_depth =
+            float3_add(optical_depth,
+                       float3_scale(sky_atmosphere_density(sky_atmosphere_height(p)), step_size));
     }
     return optical_depth;
 }
 
 VX_SKY_INLINE float3 sky_transmittance(float3 const optical_depth)
 {
-    float3 const rayleigh = sky_float3_scale(VX_SKY_RAYLEIGH_S, optical_depth.x);
-    float3 const mie =
-        sky_float3_scale(sky_float3_add(VX_SKY_MIE_S, VX_SKY_MIE_A), optical_depth.y);
-    float3 const ozone = sky_float3_scale(VX_SKY_OZONE_A, optical_depth.z);
-    return sky_float3_exp_neg(sky_float3_add(rayleigh, sky_float3_add(mie, ozone)));
+    float3 const rayleigh = float3_scale(VX_SKY_RAYLEIGH_S, optical_depth.x);
+    float3 const mie = float3_scale(float3_add(VX_SKY_MIE_S, VX_SKY_MIE_A), optical_depth.y);
+    float3 const ozone = float3_scale(VX_SKY_OZONE_A, optical_depth.z);
+    return float3_exp_neg(float3_add(rayleigh, float3_add(mie, ozone)));
 }
 
 VX_SKY_INLINE float3 sky_transmitted_sun_color(float3 const view_position,
@@ -164,8 +156,8 @@ VX_SKY_INLINE float3 sky_transmitted_sun_color(float3 const view_position,
     {
         return float3(0.f, 0.f, 0.f);
     }
-    return sky_float3_mul(
-        sun_color, sky_transmittance(sky_integrate_optical_depth(view_position, sun_direction)));
+    return float3_mul(sun_color,
+                      sky_transmittance(sky_integrate_optical_depth(view_position, sun_direction)));
 }
 
 #if defined(__HLSL_VERSION)
