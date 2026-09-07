@@ -7,8 +7,7 @@ ConstantBuffer<brick_quad_uniforms> uniforms : register(b0, space1);
 struct vs_output
 {
     float4               position : SV_Position;
-    nointerpolation uint entry_face : TEXCOORD0;
-    float2               face_uv : TEXCOORD1;
+    nointerpolation uint packed_brick : TEXCOORD0;
 };
 
 float3 face_corner(uint const face, float2 const corner)
@@ -56,7 +55,6 @@ vs_output main(uint const vertex_id : SV_VertexID, uint const instance_id : SV_I
 
     vs_output output;
     output.position = mul(uniforms.view_projection, float4(world_position, 1.0));
-    output.entry_face = face_data;
-    output.face_uv = corners[corner_indices[vertex_id]];
+    output.packed_brick = face_data & 0x00ffffffu;
     return output;
 }
