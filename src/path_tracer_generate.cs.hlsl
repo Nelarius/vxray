@@ -22,15 +22,17 @@ ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 main(uint2 const tid : SV_DispatchThreadID) {
     uint width, height;
     depth_tex.GetDimensions(width, height);
-    if (tid.x >= width || tid.y >= height)
+    uint const  checkerboard_offset = (tid.y + uniforms.frame) & 1u;
+    uint2 const pixel = uint2(tid.x * 2u + checkerboard_offset, tid.y);
+    if (pixel.x >= width || pixel.y >= height)
     {
         return;
     }
 
-    uint const path_index = tid.y * width + tid.x;
-    uint const spatial_index = spatial_index_tex.Load(int3(tid, 0)).r;
+    uint const path_index = pixel.y * width + pixel.x;
+    uint const spatial_index = spatial_index_tex.Load(int3(pixel, 0)).r;
 
-    float2 const uv = (float2(tid) + 0.5) / float2(width, height);
+    float2 const uv = (float2(pixel) + 0.5) / float2(width, height);
     float const  depth = depth_tex.SampleLevel(depth_sampler, uv, 0.0).r;
     if (depth >= 1.0 || spatial_index == VX_SPATIAL_HASH_INVALID_INDEX)
     {
@@ -49,15 +51,16 @@ main(uint2 const tid : SV_DispatchThreadID) {
     InterlockedAdd(output_path_count[0], 1u, output_path_index);
     output_path_indices[output_path_index] = path_index;
 
-    float3 const normal = unpack_normal(normal_tex.Load(int3(tid, 0)).r);
+    float3 const normal = unpack_normal(normal_tex.Load(int3(pixel, 0)).r);
     float3 const position =
         reconstruct_position(uniforms.inverse_view_projection, uv, depth, normal);
-    float3 const albedo = unpack_albedo(albedo_tex.Load(int3(tid, 0)).r).rgb;
+    float3 const albedo = unpack_albedo(albedo_tex.Load(int3(pixel, 0)).r).rgb;
     float3       throughput = (float3)1.0;
 
     // Generate next direction (MIS, albertian and sun disk)
 
-    float3 const samples = halton_sample_3d(uniforms.frame, 0u, path_index);
+    // Each pixel samples every other frame; avoid striding the base-2 Halton dimension.
+    float3 const samples = halton_sample_3d(uniforms.frame >> 1u, 0u, path_index);
     float2 const u = samples.xy;
     bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
