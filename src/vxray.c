@@ -1,4 +1,3 @@
-#include "brick_quad.h"
 #include "constants.h"
 #include "cvox.h"
 #include "display.h"
@@ -41,7 +40,6 @@
 #include <stdlib.h>
 
 static_assert(sizeof(float4x4) == 64, "float4x4 must match an HLSL column-major matrix");
-static_assert(sizeof(brick_quad_uniforms) == 96, "brick uniform layout must match HLSL");
 static_assert(sizeof(display_uniforms) == 48, "display uniform layout must match HLSL");
 static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
 static_assert(sizeof(path_tracer_index_uniforms) == 160,
@@ -1100,7 +1098,6 @@ typedef struct vxray
     vx_input  input;
     int       shading_mode;
     int       display_texture;
-    bool      use_brick_prepass;
     int       exposure_stop;
     float     rtao_radius;
     int       rtao_samples_per_frame;
@@ -1122,18 +1119,9 @@ typedef struct vxray
     bool      path_trace_lighting_dirty;
 
     // Voxel grid
-    int      grid_ext;
-    int      brick_grid_ext;
-    uint32_t face_capacity;
+    int grid_ext;
 
     // GPU
-    SDL_GPUComputePipeline*  brick_quad_compute_pipeline;
-    SDL_GPUGraphicsPipeline* brick_quad_pipeline;
-    SDL_GPUTexture*          entry_brick_texture;
-    SDL_GPUTexture*          entry_depth_texture;
-    SDL_GPUBuffer*           visible_faces_buffer;
-    SDL_GPUBuffer*           indirect_draw_buffer;
-    SDL_GPUTransferBuffer*   indirect_reset_transfer_buffer;
     SDL_GPUGraphicsPipeline* gbuffer_pipeline;
     SDL_GPUGraphicsPipeline* rtao_index_pipeline;
     SDL_GPUGraphicsPipeline* rtao_pipeline;
@@ -1183,74 +1171,10 @@ typedef struct vxray
 
 static vxray vxray_instance = {0};
 
-static bool vx_ensure_brick_textures(uint32_t const width, uint32_t const height)
-{
-    if (vxray_instance.entry_brick_texture && vxray_instance.entry_depth_texture &&
-        vxray_instance.render_width == width && vxray_instance.render_height == height)
-    {
-        return true;
-    }
-
-    SDL_GPUTexture* const entry_depth_texture = vx_create_gpu_texture(
-        vxray_instance.gpu_device,
-        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                   .format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-                                   .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
-                                   .width = width,
-                                   .height = height,
-                                   .layer_count_or_depth = 1,
-                                   .num_levels = 1,
-                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
-        "entry-depth");
-    if (!entry_depth_texture)
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create entry depth texture: %s",
-                     SDL_GetError());
-        return false;
-    }
-
-    SDL_GPUTexture* const entry_brick_texture = vx_create_gpu_texture(
-        vxray_instance.gpu_device,
-        (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
-                                   .format = SDL_GPU_TEXTUREFORMAT_R32_UINT,
-                                   .usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                            SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ,
-                                   .width = width,
-                                   .height = height,
-                                   .layer_count_or_depth = 1,
-                                   .num_levels = 1,
-                                   .sample_count = SDL_GPU_SAMPLECOUNT_1},
-        "entry-brick");
-    if (!entry_brick_texture)
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create entry brick texture: %s",
-                     SDL_GetError());
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, entry_depth_texture);
-        return false;
-    }
-
-    if (vxray_instance.entry_brick_texture)
-    {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.entry_brick_texture);
-    }
-    if (vxray_instance.entry_depth_texture)
-    {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.entry_depth_texture);
-    }
-    vxray_instance.entry_brick_texture = entry_brick_texture;
-    vxray_instance.entry_depth_texture = entry_depth_texture;
-    return true;
-}
-
 static bool vx_ensure_render_textures(uint32_t const width, uint32_t const height)
 {
     assert(width > 0);
     assert(height > 0);
-
-    if (!vx_ensure_brick_textures(width, height))
-    {
-        return false;
-    }
 
     if (vxray_instance.gbuffer_albedo_texture && vxray_instance.gbuffer_normal_texture &&
         vxray_instance.gbuffer_depth_texture && vxray_instance.rtao_index_textures[0] &&
@@ -1643,7 +1567,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
 {
     (void)appstate;
 
-    vxray_instance.use_brick_prepass = true;
     vxray_instance.rtao_radius = 8.f;
     vxray_instance.rtao_samples_per_frame = 1;
     vxray_instance.rtao_sp = 10.f;
@@ -1763,94 +1686,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
-    // Brick-face generation pipeline
-
-    vxray_instance.brick_quad_compute_pipeline = vx_create_gpu_compute_pipeline(
-        vxray_instance.gpu_device,
-        (SDL_GPUComputePipelineCreateInfo){.code_size = BRICK_QUAD_CS_SIZE,
-                                           .code = BRICK_QUAD_CS_BYTES,
-                                           .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                           .format = GPU_SHADER_FORMAT,
-                                           .num_readonly_storage_textures = 1,
-                                           .num_readwrite_storage_buffers = 2,
-                                           .num_uniform_buffers = 1,
-                                           .threadcount_x = 64,
-                                           .threadcount_y = 1,
-                                           .threadcount_z = 1},
-        "brick-compute");
-    if (!vxray_instance.brick_quad_compute_pipeline)
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create brick-quad compute pipeline: %s",
-                     SDL_GetError());
-        return SDL_APP_FAILURE;
-    }
-
-    // Brick-entry rasterization pipeline
-
-    {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = BRICK_QUAD_VS_SIZE,
-                                                 .code = BRICK_QUAD_VS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX,
-                                                 .num_storage_buffers = 1,
-                                                 .num_uniform_buffers = 1};
-        SDL_GPUShaderCreateInfo const ps_info = {.code_size = BRICK_QUAD_PS_SIZE,
-                                                 .code = BRICK_QUAD_PS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT};
-        SDL_GPUShader* const          vertex_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
-        SDL_GPUShader* const fragment_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
-        if (!vertex_shader || !fragment_shader)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create brick-quad shaders: %s",
-                         SDL_GetError());
-            if (fragment_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-            }
-            if (vertex_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-            }
-            return SDL_APP_FAILURE;
-        }
-
-        vxray_instance.brick_quad_pipeline = vx_create_gpu_graphics_pipeline(
-            vxray_instance.gpu_device,
-            (SDL_GPUGraphicsPipelineCreateInfo){
-                .vertex_shader = vertex_shader,
-                .fragment_shader = fragment_shader,
-                .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-                .rasterizer_state = (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
-                                                             .cull_mode = SDL_GPU_CULLMODE_NONE,
-                                                             .enable_depth_clip = true},
-                .depth_stencil_state =
-                    (SDL_GPUDepthStencilState){.compare_op = SDL_GPU_COMPAREOP_LESS,
-                                               .enable_depth_test = true,
-                                               .enable_depth_write = true},
-                .target_info =
-                    (SDL_GPUGraphicsPipelineTargetInfo){
-                        .num_color_targets = 1,
-                        .color_target_descriptions =
-                            (SDL_GPUColorTargetDescription[]){
-                                {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT}},
-                        .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-                        .has_depth_stencil_target = true}},
-            "brick-raster");
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-        if (!vxray_instance.brick_quad_pipeline)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create brick-quad graphics pipeline: %s",
-                         SDL_GetError());
-            return SDL_APP_FAILURE;
-        }
-    }
-
     // G-buffer fullscreen pipeline
 
     {
@@ -1864,7 +1699,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_storage_textures = 8,
+                                                 .num_storage_textures = 7,
                                                  .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -2283,7 +2118,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .format = GPU_SHADER_FORMAT,
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 3,
-                                                 .num_storage_textures = 4,
+                                                 .num_storage_textures = 3,
                                                  .num_storage_buffers = 1,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
@@ -2382,71 +2217,10 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
             assert(scene.chunk_masks.ptr);
             assert(scene.grid_ext);
             vxray_instance.grid_ext = scene.grid_ext;
-            vxray_instance.brick_grid_ext = scene.brick_grid_ext;
-            if (scene.brick_grid_ext <= 0 || scene.brick_grid_ext > 256)
-            {
-                SDL_LogError(SDL_LOG_CATEGORY_GPU, "Brick coordinates must fit in eight bits");
-                vx_scene_free(&scene);
-                return SDL_APP_FAILURE;
-            }
-            // Each occupied run emits at most one camera-facing face along a row.
-            uint32_t const ext = (uint32_t)scene.brick_grid_ext;
-            vxray_instance.face_capacity = 3u * ((ext + 1u) / 2u) * ext * ext;
         }
 
         {
             SDL_GPUDevice* const device = vxray_instance.gpu_device;
-            {
-                uint32_t const visible_faces_size =
-                    vxray_instance.face_capacity * (uint32_t)sizeof(uint32_t);
-                SDL_GPUBuffer* const visible_faces_buffer = vx_create_gpu_buffer(
-                    device,
-                    (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
-                                                       SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
-                                              .size = visible_faces_size},
-                    "visible-faces");
-                if (!visible_faces_buffer)
-                {
-                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create visible-face buffer: %s",
-                                 SDL_GetError());
-                    vx_scene_free(&scene);
-                    return SDL_APP_FAILURE;
-                }
-                vxray_instance.visible_faces_buffer = visible_faces_buffer;
-            }
-            {
-                SDL_GPUBuffer* const indirect_draw_buffer = vx_create_gpu_buffer(
-                    device,
-                    (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE |
-                                                       SDL_GPU_BUFFERUSAGE_INDIRECT,
-                                              .size = (uint32_t)sizeof(SDL_GPUIndirectDrawCommand)},
-                    "indirect-draw");
-                if (!indirect_draw_buffer)
-                {
-                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create indirect draw buffer: %s",
-                                 SDL_GetError());
-                    vx_scene_free(&scene);
-                    return SDL_APP_FAILURE;
-                }
-                vxray_instance.indirect_draw_buffer = indirect_draw_buffer;
-            }
-            {
-                SDL_GPUTransferBuffer* const reset_transfer_buffer = vx_create_gpu_transfer_buffer(
-                    device,
-                    (SDL_GPUTransferBufferCreateInfo){
-                        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-                        .size = (uint32_t)sizeof(SDL_GPUIndirectDrawCommand)},
-                    "indirect-reset");
-                if (!reset_transfer_buffer)
-                {
-                    SDL_LogError(SDL_LOG_CATEGORY_GPU,
-                                 "Failed to create indirect reset transfer buffer: %s",
-                                 SDL_GetError());
-                    vx_scene_free(&scene);
-                    return SDL_APP_FAILURE;
-                }
-                vxray_instance.indirect_reset_transfer_buffer = reset_transfer_buffer;
-            }
 
             if (!SDL_GPUTextureSupportsFormat(vxray_instance.gpu_device,
                                               SDL_GPU_TEXTUREFORMAT_R8_UINT, SDL_GPU_TEXTURETYPE_3D,
@@ -2825,21 +2599,11 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         igRadioButton_IntPtr("Sky-view LUT", &vxray_instance.display_texture,
                              VX_DISPLAY_TEXTURE_SKY_VIEW);
     }
-    igRadioButton_IntPtr("Brick coordinates", &vxray_instance.display_texture,
-                         VX_DISPLAY_TEXTURE_BRICK_COORDINATES);
     igRadioButton_IntPtr("Normal", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_NORMAL);
     igRadioButton_IntPtr("Cell size", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_CELL_SIZE);
     igRadioButton_IntPtr("Spatial index", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_SPATIAL_INDEX);
-    bool const prepass_changed = igCheckbox("Brick prepass", &vxray_instance.use_brick_prepass);
-    vxray_instance.rtao_spatial_hash_dirty |= prepass_changed;
-    vxray_instance.path_trace_spatial_hash_dirty |= prepass_changed;
-    if (prepass_changed)
-    {
-        vxray_instance.rtao_history_valid = false;
-        vxray_instance.path_trace_history_valid = false;
-    }
     bool invalidate_ao = false;
     if (vxray_instance.shading_mode == VX_SHADING_RTAO)
     {
@@ -2943,21 +2707,16 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     assert(isfinite(fov) && fov > 0.f && fov < VX_PI_F);
     assert(isfinite(near_plane) && near_plane > 0.f);
     assert(isfinite(far_plane) && far_plane > near_plane);
-    mat4s const    view = glms_look_lh_zo(camera->position, forward, world_up);
-    mat4s          projection = glms_perspective_lh_zo(fov, aspect, near_plane, far_plane);
-    mat4s const    view_projection = glms_mat4_mul(projection, view);
-    mat4s const    inverse_view_projection = glms_mat4_inv(view_projection);
-    float4x4 const view_projection_data = vx_float4x4_from_mat4(view_projection);
-    brick_quad_uniforms const brick_uniforms = {
-        .camera_position = vx_float4_from_vec3(camera->position, 0.f),
-        .view_projection = view_projection_data,
-        .brick_grid_ext = (uint)vxray_instance.brick_grid_ext};
+    mat4s const            view = glms_look_lh_zo(camera->position, forward, world_up);
+    mat4s                  projection = glms_perspective_lh_zo(fov, aspect, near_plane, far_plane);
+    mat4s const            view_projection = glms_mat4_mul(projection, view);
+    mat4s const            inverse_view_projection = glms_mat4_inv(view_projection);
+    float4x4 const         view_projection_data = vx_float4x4_from_mat4(view_projection);
     gbuffer_uniforms const gbuffer_uniform_data = {
         .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
         .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
         .view_projection = view_projection_data,
-        .grid_ext = vxray_instance.grid_ext,
-        .use_brick_prepass = (uint)vxray_instance.use_brick_prepass};
+        .grid_ext = vxray_instance.grid_ext};
     bool const render_rtao = vxray_instance.shading_mode == VX_SHADING_RTAO;
     bool const reset_ao = render_rtao && (vxray_instance.rtao_spatial_hash_dirty || invalidate_ao);
     bool const reset_path_trace_hash = !render_rtao && vxray_instance.path_trace_spatial_hash_dirty;
@@ -3096,86 +2855,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         vxray_instance.sky_view_dirty = false;
     }
 
-    // Reset the complete indirect draw command on the GPU timeline.
-
-    SDL_GPUIndirectDrawCommand const indirect_command = {
-        .num_vertices = 6,
-        .num_instances = 0,
-        .first_vertex = 0,
-        .first_instance = 0,
-    };
-    void* const reset_data =
-        SDL_MapGPUTransferBuffer(gpu_device, vxray_instance.indirect_reset_transfer_buffer, true);
-    if (!reset_data)
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't map indirect reset buffer: %s",
-                     SDL_GetError());
-        SDL_CancelGPUCommandBuffer(cmd_buffer);
-        return SDL_APP_FAILURE;
-    }
-    SDL_memcpy(reset_data, &indirect_command, sizeof(indirect_command));
-    SDL_UnmapGPUTransferBuffer(gpu_device, vxray_instance.indirect_reset_transfer_buffer);
-
-    SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
-    assert(copy_pass);
-    SDL_UploadToGPUBuffer(
-        copy_pass,
-        &(SDL_GPUTransferBufferLocation){
-            .transfer_buffer = vxray_instance.indirect_reset_transfer_buffer, .offset = 0},
-        &(SDL_GPUBufferRegion){.buffer = vxray_instance.indirect_draw_buffer,
-                               .offset = 0,
-                               .size = (uint32_t)sizeof(indirect_command)},
-        true);
-    SDL_EndGPUCopyPass(copy_pass);
-
-    // Generate exposed, camera-facing brick faces.
-
-    SDL_GPUStorageBufferReadWriteBinding const writable_buffers[] = {
-        {.buffer = vxray_instance.visible_faces_buffer, .cycle = true},
-        {.buffer = vxray_instance.indirect_draw_buffer, .cycle = false},
-    };
-    SDL_GPUComputePass* const compute_pass = SDL_BeginGPUComputePass(
-        cmd_buffer, 0, 0, writable_buffers, SDL_arraysize(writable_buffers));
-    assert(compute_pass);
-    SDL_BindGPUComputePipeline(compute_pass, vxray_instance.brick_quad_compute_pipeline);
-    SDL_GPUTexture* const compute_textures[] = {vxray_instance.brick_mask_texture};
-    SDL_BindGPUComputeStorageTextures(compute_pass, 0, compute_textures,
-                                      SDL_arraysize(compute_textures));
-    SDL_PushGPUComputeUniformData(cmd_buffer, 0, &brick_uniforms, sizeof(brick_uniforms));
-    uint32_t const brick_count =
-        (uint32_t)(vxray_instance.brick_grid_ext * vxray_instance.brick_grid_ext *
-                   vxray_instance.brick_grid_ext);
-    SDL_DispatchGPUCompute(compute_pass, (brick_count + 63u) / 64u, 1, 1);
-    SDL_EndGPUComputePass(compute_pass);
-
-    // Rasterize the generated quads into entry depth and packed brick coordinates.
-
-    SDL_GPUColorTargetInfo const brick_target_info = {.texture = vxray_instance.entry_brick_texture,
-                                                      .clear_color =
-                                                          (SDL_FColor){0.f, 0.f, 0.f, 0.f},
-                                                      .load_op = SDL_GPU_LOADOP_CLEAR,
-                                                      .store_op = SDL_GPU_STOREOP_STORE,
-                                                      .cycle = true};
-
-    SDL_GPUDepthStencilTargetInfo const depth_target_info = {
-        .texture = vxray_instance.entry_depth_texture,
-        .clear_depth = 1.f,
-        .load_op = SDL_GPU_LOADOP_CLEAR,
-        .store_op = SDL_GPU_STOREOP_DONT_CARE,
-        .stencil_load_op = SDL_GPU_LOADOP_DONT_CARE,
-        .stencil_store_op = SDL_GPU_STOREOP_DONT_CARE,
-        .cycle = true};
-    SDL_GPURenderPass* const brick_pass =
-        SDL_BeginGPURenderPass(cmd_buffer, &brick_target_info, 1, &depth_target_info);
-    assert(brick_pass);
-    SDL_BindGPUGraphicsPipeline(brick_pass, vxray_instance.brick_quad_pipeline);
-    SDL_GPUBuffer* const vertex_storage_buffers[] = {vxray_instance.visible_faces_buffer};
-    SDL_BindGPUVertexStorageBuffers(brick_pass, 0, vertex_storage_buffers,
-                                    SDL_arraysize(vertex_storage_buffers));
-    SDL_PushGPUVertexUniformData(cmd_buffer, 0, &brick_uniforms, sizeof(brick_uniforms));
-    SDL_DrawGPUPrimitivesIndirect(brick_pass, vxray_instance.indirect_draw_buffer, 0, 1);
-    SDL_EndGPURenderPass(brick_pass);
-
     // Trace the primary voxel rays into the G-buffer.
 
     SDL_GPUColorTargetInfo const gbuffer_target_info[] = {
@@ -3206,7 +2885,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         vxray_instance.voxel_texture,      vxray_instance.voxel_mask_texture,
         vxray_instance.brick_mask_texture, vxray_instance.chunk_mask_texture,
         vxray_instance.voxel_aadf_texture, vxray_instance.brick_aadf_texture,
-        vxray_instance.chunk_aadf_texture, vxray_instance.entry_brick_texture,
+        vxray_instance.chunk_aadf_texture,
     };
     SDL_BindGPUFragmentStorageTextures(gbuffer_pass, 0, storage_textures,
                                        SDL_arraysize(storage_textures));
@@ -3527,7 +3206,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         vxray_instance.gbuffer_normal_texture,
         render_rtao ? vxray_instance.rtao_index_textures[current_history]
                     : vxray_instance.path_trace_index_textures[current_history],
-        vxray_instance.entry_brick_texture,
     };
     SDL_BindGPUFragmentStorageTextures(render_pass, 0, display_storage_textures,
                                        SDL_arraysize(display_storage_textures));
@@ -3581,51 +3259,6 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
     (void)result;
 
     imgui_sdl3_shutdown();
-
-    if (vxray_instance.indirect_reset_transfer_buffer)
-    {
-        SDL_ReleaseGPUTransferBuffer(vxray_instance.gpu_device,
-                                     vxray_instance.indirect_reset_transfer_buffer);
-        vxray_instance.indirect_reset_transfer_buffer = 0;
-    }
-
-    if (vxray_instance.indirect_draw_buffer)
-    {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.indirect_draw_buffer);
-        vxray_instance.indirect_draw_buffer = 0;
-    }
-
-    if (vxray_instance.visible_faces_buffer)
-    {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.visible_faces_buffer);
-        vxray_instance.visible_faces_buffer = 0;
-    }
-
-    if (vxray_instance.entry_depth_texture)
-    {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.entry_depth_texture);
-        vxray_instance.entry_depth_texture = 0;
-    }
-
-    if (vxray_instance.entry_brick_texture)
-    {
-        SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.entry_brick_texture);
-        vxray_instance.entry_brick_texture = 0;
-    }
-
-    if (vxray_instance.brick_quad_pipeline)
-    {
-        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device,
-                                       vxray_instance.brick_quad_pipeline);
-        vxray_instance.brick_quad_pipeline = 0;
-    }
-
-    if (vxray_instance.brick_quad_compute_pipeline)
-    {
-        SDL_ReleaseGPUComputePipeline(vxray_instance.gpu_device,
-                                      vxray_instance.brick_quad_compute_pipeline);
-        vxray_instance.brick_quad_compute_pipeline = 0;
-    }
 
     if (vxray_instance.spatial_hash_reset_transfer_buffer)
     {

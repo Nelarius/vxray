@@ -18,8 +18,7 @@ Texture3D<uint>        chunk_masks : register(t3, space2);
 Texture3D<uint>        voxel_aadf : register(t4, space2);
 Texture3D<uint>        brick_aadf : register(t5, space2);
 Texture3D<uint>        chunk_aadf : register(t6, space2);
-Texture2D<uint>        entry_bricks : register(t7, space2);
-StructuredBuffer<uint> palette_rgba : register(t8, space2);
+StructuredBuffer<uint> palette_rgba : register(t7, space2);
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
@@ -104,21 +103,14 @@ float3 aadf_exit_plane(int16_t3 const coord, int16_t const cell_ext, uint const 
                   ray_dir.z < 0.0 ? lower.z : upper.z);
 }
 
-uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir, uint const entry_record)
+uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
 {
     float3 const inv_dir = 1.0 / (ray_dir + (float3)(ray_dir == 0.0) * 1e-30);
-    float3       p0 = (float3)0.0;
-    float3       p1 = (float3)uniforms.grid_ext;
-    if (entry_record != 0u)
-    {
-        uint const packed = entry_record - 1u;
-        p0 = float3(packed & 255u, (packed >> 8u) & 255u, (packed >> 16u) & 255u) * VX_BRICK_EXT;
-        p1 = p0 + VX_BRICK_EXT;
-    }
-    float  tmin;
-    float  tmax;
-    float3 entry_mask;
-    if (!ray_box_test(ray_origin, inv_dir, p0, p1, tmin, tmax, entry_mask))
+    float const  grid_ext = (float)uniforms.grid_ext;
+    float        tmin;
+    float        tmax;
+    float3       entry_mask;
+    if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)grid_ext, tmin, tmax, entry_mask))
     {
         return VX_NO_CELL;
     }
@@ -130,7 +122,6 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir, uint const 
     uint         crossed_axis = entry_weights.y > entry_weights.x ? 1u : 0u;
     crossed_axis = entry_weights.z > max(entry_weights.x, entry_weights.y) ? 2u : crossed_axis;
 
-    // The entry brick only selects the start; traversal continues through the entire scene.
     for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
     {
         if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
@@ -213,31 +204,11 @@ ps_output miss()
 
 ps_output main(ps_input const input)
 {
-    uint entry_record = 0u;
-    if (uniforms.use_brick_prepass != 0u)
-    {
-        float3 const camera_pos = uniforms.camera_pos.xyz;
-        bool         camera_inside = false;
-        if (all(camera_pos >= 0.0) && all(camera_pos < (float)uniforms.grid_ext))
-        {
-            camera_inside = brick_occupied(int16_t3(camera_pos / VX_BRICK_EXT));
-        }
-        // Exposed entry faces cannot seed rays originating inside an occupied brick.
-        if (!camera_inside)
-        {
-            entry_record = entry_bricks.Load(int3(input.position.xy, 0)).r;
-            if (entry_record == 0u)
-            {
-                return miss();
-            }
-        }
-    }
-
     float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 const dir =
         normalize(unproject(uniforms.inverse_view_projection, ndc, 1.0) - uniforms.camera_pos.xyz);
 
-    uint const packed_cell = sparse_ray_march(uniforms.camera_pos.xyz, dir, entry_record);
+    uint const packed_cell = sparse_ray_march(uniforms.camera_pos.xyz, dir);
     if (packed_cell == VX_NO_CELL)
     {
         return miss();
