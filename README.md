@@ -64,6 +64,7 @@ pitch = 0
 - _Branchless Voxel Raycasting_, [Shadertoy](https://www.shadertoy.com/view/4dX3zl)
 - _Spatial Hashing for Raytraced Ambient Occlusion_, [Interplay of Light](https://interplayoflight.wordpress.com/2025/11/23/spatial-hashing-for-raytraced-ambient-occlusion/)
 - _Globally Illuminated Voxel Worlds Accelerated With Nested Axis-Aligned Distance Fields_, [NAADF (Github)](https://github.com/cg-tuwien/NAADF/tree/main)
+- _Wavefront Path Tracing_, [Jacco Bikker's blog entry](https://jacco.ompf2.com/2019/07/18/wavefront-path-tracing/)
 
 ## AI Disclosure
 
