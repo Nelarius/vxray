@@ -19,15 +19,6 @@ SamplerState depth_sampler : register(s0, space2);
 
 ConstantBuffer<rtao_uniforms> uniforms : register(b0, space3);
 
-float2 r2_sequence(float const n)
-{
-    // 2-dimensional golden ratio additive recurrence sequence
-    // https://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
-    float const a1 = 0.7548777f;
-    float const a2 = 0.5698403f;
-    return frac(float2(n * a1, n * a2));
-}
-
 uint mask_linear_idx(int16_t3 const coord)
 {
     int16_t3 const local = coord & (VX_MASK_EXT - 1);
@@ -121,10 +112,9 @@ float main(ps_input const input) : SV_Target0
     }
 
     float3 const pos = offset_ray(face_position, normal);
-    uint2 const  frame_seed =
-        uint2(uniforms.frame_index * 0x9E3779B9u, pcg(uniforms.frame_index ^ 0xA511E9B3u));
-    float2 const pixel_noise = as_normalized_float(pcg2d(pixel ^ frame_seed));
-    float2 const u = frac(pixel_noise + r2_sequence((float)uniforms.sample_index));
+    uint const   stable_stream_id = pixel.y * width + pixel.x;
+    float2 const u =
+        halton_sample_2d(uniforms.frame_index, uniforms.sample_index, stable_stream_id);
     float3 const direction =
         orient_axis_aligned_sample_direction(sample_cosine_weighted_hemisphere(u), normal);
     uint const occlusion = sparse_ray_march(pos, direction, uniforms.rtao_radius);
