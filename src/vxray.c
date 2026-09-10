@@ -3022,7 +3022,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         SDL_DrawGPUPrimitives(path_trace_index_pass, 3, 1, 0, 0);
         SDL_EndGPURenderPass(path_trace_index_pass);
 
-        // Generate one path per eligible pixel.
+        // Generate one path per eligible pixel on alternating checkerboard halves.
 
         {
             SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
@@ -3073,8 +3073,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                           SDL_arraysize(generate_storage_textures));
         SDL_PushGPUComputeUniformData(cmd_buffer, 0, &path_trace_uniform_data,
                                       sizeof(path_trace_uniform_data));
+        uint32_t const generate_width = (width + 1u) / 2u;
         uint32_t const screen_group_count_x =
-            (width + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) / VX_WAVEFRONT_SCREEN_THREAD_COUNT;
+            (generate_width + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) /
+            VX_WAVEFRONT_SCREEN_THREAD_COUNT;
         uint32_t const screen_group_count_y =
             (height + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) / VX_WAVEFRONT_SCREEN_THREAD_COUNT;
         SDL_DispatchGPUCompute(generate_pass, screen_group_count_x, screen_group_count_y, 1);

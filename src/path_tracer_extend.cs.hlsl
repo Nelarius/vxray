@@ -216,7 +216,8 @@ main(uint const thread_id : SV_DispatchThreadID) {
 
     // Generate next direction (MIS, albertian and sun disk)
 
-    float3 const samples = halton_sample_3d(uniforms.frame, uniforms.bounce, path_index);
+    // Use the same checkerboard sample index as path generation.
+    float3 const samples = halton_sample_3d(uniforms.frame >> 1u, uniforms.bounce, path_index);
     float2 const u = samples.xy;
     bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
