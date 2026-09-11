@@ -182,14 +182,14 @@ float2 halton_sample_2d(uint const frame, uint const bounce, uint const stable_s
                   rotated_halton(frame_idx, first_dimension + 1u, stable_stream_id));
 }
 
-float3 halton_sample_3d(uint const frame, uint const bounce, uint const stable_stream_id)
+float3 halton_sample_3d(uint const sample_index, uint const bounce, uint const stable_stream_id)
 {
-    // Wrap around to prevent robustness issues with very large frames.
-    uint const frame_idx = frame & 8191u;
+    // Wrap after 8192 admitted samples, independently of the frame schedule.
+    uint const index = sample_index & 8191u;
     uint const first_dimension = 3u * bounce;
-    return float3(rotated_halton(frame_idx, first_dimension, stable_stream_id),
-                  rotated_halton(frame_idx, first_dimension + 1u, stable_stream_id),
-                  rotated_halton(frame_idx, first_dimension + 2u, stable_stream_id));
+    return float3(rotated_halton(index, first_dimension, stable_stream_id),
+                  rotated_halton(index, first_dimension + 1u, stable_stream_id),
+                  rotated_halton(index, first_dimension + 2u, stable_stream_id));
 }
 
 float3 sample_cone(float2 const u, float const cos_theta_max)
