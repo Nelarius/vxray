@@ -15,6 +15,7 @@ RWStructuredBuffer<uint>                   output_ray_count : register(u2, space
 RWStructuredBuffer<uint>                   output_path_indices : register(u3, space1);
 RWStructuredBuffer<uint>                   output_path_count : register(u4, space1);
 RWStructuredBuffer<uint4>                  hash_payloads : register(u5, space1);
+RWStructuredBuffer<uint>                   sample_ordinals : register(u6, space1);
 
 ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 
@@ -22,14 +23,12 @@ ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 main(uint2 const tid : SV_DispatchThreadID) {
     uint width, height;
     depth_tex.GetDimensions(width, height);
-    uint const  checkerboard_offset = (tid.y + uniforms.frame) & 1u;
-    uint2 const pixel = uint2(tid.x * 2u + checkerboard_offset, tid.y);
+    uint2 const pixel = tid;
     if (pixel.x >= width || pixel.y >= height)
     {
         return;
     }
 
-    uint const path_index = pixel.y * width + pixel.x;
     uint const spatial_index = spatial_index_tex.Load(int3(pixel, 0)).r;
 
     float2 const uv = (float2(pixel) + 0.5) / float2(width, height);
@@ -39,17 +38,34 @@ main(uint2 const tid : SV_DispatchThreadID) {
         return;
     }
 
-    uint4 const payload = hash_payloads[spatial_index];
-    // NOTE: technically this is a race condition as we increment the payload at the end of the
-    // pipeline. Multiple pixels may contribute to a single cell.
-    if (payload.w >= VX_PATH_TRACE_SAMPLE_LIMIT)
+    // Counts describe completed samples. Shared cells may admit several paths this frame,
+    // including duplicate bootstrap work and samples beyond the limit.
+    uint const count = hash_payloads[spatial_index].w;
+    if (count >= VX_PATH_TRACE_SAMPLE_LIMIT)
     {
         return;
     }
 
-    uint output_path_index;
+    if (count >= VX_PATH_TRACE_BOOTSTRAP_SAMPLE_COUNT)
+    {
+        uint const  k = VX_PATH_TRACE_UPDATE_TILE_SIZE;
+        uint2 const tile = pixel / k;
+        uint const  phase = pcg(tile.x ^ pcg(tile.y)) % (k * k);
+        uint const  slot = (uniforms.frame % (k * k) + phase) % (k * k);
+        if (any(pixel % k != uint2(slot % k, slot / k)))
+        {
+            return;
+        }
+    }
+
+    uint const path_index = pixel.y * width + pixel.x;
+    uint       output_path_index;
     InterlockedAdd(output_path_count[0], 1u, output_path_index);
     output_path_indices[output_path_index] = path_index;
+
+    // One writer per pixel. Advance for every admitted path, including zero-radiance samples.
+    uint const sample_index = sample_ordinals[path_index];
+    sample_ordinals[path_index] = sample_index + 1u;
 
     float3 const normal = unpack_normal(normal_tex.Load(int3(pixel, 0)).r);
     float3 const position =
@@ -59,8 +75,7 @@ main(uint2 const tid : SV_DispatchThreadID) {
 
     // Generate next direction (MIS, albertian and sun disk)
 
-    // Each pixel samples every other frame; avoid striding the base-2 Halton dimension.
-    float3 const samples = halton_sample_3d(uniforms.frame >> 1u, 0u, path_index);
+    float3 const samples = halton_sample_3d(sample_index, 0u, path_index);
     float2 const u = samples.xy;
     bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
@@ -80,6 +95,7 @@ main(uint2 const tid : SV_DispatchThreadID) {
     state.throughput_and_spatial_index = float4(throughput, asfloat(spatial_index));
     state.radiance = float4((float3)0.0, 0.0);
     path_state_buffer[path_index] = state;
+    // Keep zero-radiance paths in the accumulation queue so they count as completed samples.
     if (n_dot_l == 0.0)
     {
         return;

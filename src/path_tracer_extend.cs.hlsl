@@ -14,6 +14,7 @@ Texture3D<uint>                   chunk_aadf : register(t7, space0);
 StructuredBuffer<uint>            palette_rgba : register(t8, space0);
 StructuredBuffer<path_tracer_ray> input_ray_buffer : register(t9, space0);
 StructuredBuffer<uint>            input_ray_count : register(t10, space0);
+StructuredBuffer<uint>            sample_ordinals : register(t11, space0);
 SamplerState                      sky_view_sampler : register(s0, space0);
 
 RWStructuredBuffer<path_tracer_ray>        output_ray_buffer : register(u0, space1);
@@ -216,8 +217,9 @@ main(uint const thread_id : SV_DispatchThreadID) {
 
     // Generate next direction (MIS, albertian and sun disk)
 
-    // Use the same checkerboard sample index as path generation.
-    float3 const samples = halton_sample_3d(uniforms.frame >> 1u, uniforms.bounce, path_index);
+    // Generation advances the next ordinal once; it stays unchanged throughout extension.
+    uint const   sample_index = sample_ordinals[path_index] - 1u;
+    float3 const samples = halton_sample_3d(sample_index, uniforms.bounce, path_index);
     float2 const u = samples.xy;
     bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
