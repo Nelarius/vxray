@@ -2615,6 +2615,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     {
         igRadioButton_IntPtr("Path traced", &vxray_instance.display_texture,
                              VX_DISPLAY_TEXTURE_PATH_TRACE);
+        igRadioButton_IntPtr("Shading", &vxray_instance.display_texture,
+                             VX_DISPLAY_TEXTURE_DEMODULATED_RADIANCE);
         igRadioButton_IntPtr("Sky-view LUT", &vxray_instance.display_texture,
                              VX_DISPLAY_TEXTURE_SKY_VIEW);
     }
