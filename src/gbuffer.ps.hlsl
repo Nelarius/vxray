@@ -18,7 +18,8 @@ Texture3D<uint>        chunk_masks : register(t3, space2);
 Texture3D<uint>        voxel_aadf : register(t4, space2);
 Texture3D<uint>        brick_aadf : register(t5, space2);
 Texture3D<uint>        chunk_aadf : register(t6, space2);
-StructuredBuffer<uint> palette_rgba : register(t7, space2);
+Texture2D<uint>        entry_bricks : register(t7, space2);
+StructuredBuffer<uint> palette_rgba : register(t8, space2);
 
 uint voxel_at(int16_t3 const p) { return voxels.Load(int4(p, 0)).r; }
 
@@ -103,25 +104,47 @@ float3 aadf_exit_plane(int16_t3 const coord, int16_t const cell_ext, uint const 
                   ray_dir.z < 0.0 ? lower.z : upper.z);
 }
 
-uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
+uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir, uint const entry_record)
 {
     float3 const inv_dir = 1.0 / (ray_dir + (float3)(ray_dir == 0.0) * 1e-30);
-    float const  grid_ext = (float)uniforms.grid_ext;
-    float        tmin;
-    float        tmax;
-    float3       entry_mask;
-    if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)grid_ext, tmin, tmax, entry_mask))
+    float3       start = (float3)0.0;
+    float3       entry_mask = (float3)0.0;
+    // The high bit marks raster face borders. Use the accelerated start when the border bit is
+    // clear.
+    if (entry_record != 0u && (entry_record & 0x80000000u) == 0u)
     {
-        return VX_NO_CELL;
+        uint const  packed = entry_record - 1u;
+        uint const  face = packed >> 24u;
+        uint const  axis = face >> 1u;
+        uint const  brick = (packed >> (axis * 8u)) & 255u;
+        float const plane = (float)((brick + (face & 1u)) * VX_BRICK_EXT);
+        float const t = (plane - ray_origin[axis]) * inv_dir[axis];
+        // Use the exposed face, not an internal AABB side the ray may cross at a seam.
+        // The reconstructed ray can enter the neighboring brick through this same plane.
+        start = ray_origin + t * ray_dir;
+        start[axis] = plane;
+        entry_mask = float3(axis == uint3(0u, 1u, 2u));
+    }
+    // Use the full scene AABB otherwise.
+    else
+    {
+        float tmin;
+        float tmax;
+        if (!ray_box_test(ray_origin, inv_dir, (float3)0.0, (float3)uniforms.grid_ext, tmin, tmax,
+                          entry_mask))
+        {
+            return VX_NO_CELL;
+        }
+        start = ray_origin + tmin * ray_dir;
     }
 
-    float3 const start = ray_origin + tmin * ray_dir;
     int16_t3     ipos = int16_t3(floor(start + entry_mask * sign(ray_dir) * 0.5));
     float3       local_pos = start - float3(ipos);
     float3 const entry_weights = entry_mask * abs(ray_dir);
     uint         crossed_axis = entry_weights.y > entry_weights.x ? 1u : 0u;
     crossed_axis = entry_weights.z > max(entry_weights.x, entry_weights.y) ? 2u : crossed_axis;
 
+    // The entry brick only selects the start; traversal continues through the entire scene.
     for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
     {
         if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
@@ -204,11 +227,28 @@ ps_output miss()
 
 ps_output main(ps_input const input)
 {
+    float3 const camera_pos = uniforms.camera_pos.xyz;
+    bool         camera_inside = false;
+    if (all(camera_pos >= 0.0) && all(camera_pos < (float)uniforms.grid_ext))
+    {
+        camera_inside = brick_occupied(int16_t3(camera_pos / VX_BRICK_EXT));
+    }
+    // Exposed entry faces cannot seed rays originating inside an occupied brick.
+    uint entry_record = 0u;
+    if (!camera_inside)
+    {
+        entry_record = entry_bricks.Load(int3(input.position.xy, 0)).r;
+        if (entry_record == 0u)
+        {
+            return miss();
+        }
+    }
+
     float2 const ndc = input.uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
     float3 const dir =
         normalize(unproject(uniforms.inverse_view_projection, ndc, 1.0) - uniforms.camera_pos.xyz);
 
-    uint const packed_cell = sparse_ray_march(uniforms.camera_pos.xyz, dir);
+    uint const packed_cell = sparse_ray_march(uniforms.camera_pos.xyz, dir, entry_record);
     if (packed_cell == VX_NO_CELL)
     {
         return miss();
