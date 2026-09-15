@@ -122,7 +122,7 @@ uint sparse_ray_march(float3 const ray_origin, float3 const ray_dir)
     uint         crossed_axis = entry_weights.y > entry_weights.x ? 1u : 0u;
     crossed_axis = entry_weights.z > max(entry_weights.x, entry_weights.y) ? 2u : crossed_axis;
 
-    for (int i = 0; i < 3 * uniforms.grid_ext; ++i)
+    for (;;)
     {
         if (any((uint16_t3)ipos >= (uint16_t)uniforms.grid_ext))
         {
