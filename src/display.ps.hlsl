@@ -16,6 +16,7 @@ Texture2D<uint>          albedo_tex : register(t3, space2);
 Texture2D<uint>          normal_tex : register(t4, space2);
 Texture2D<uint>          spatial_index_tex : register(t5, space2);
 StructuredBuffer<float4> path_trace_output : register(t6, space2);
+StructuredBuffer<uint>   sharc_checksums : register(t7, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 SamplerState visibility_sampler : register(s1, space2);
@@ -53,6 +54,20 @@ float3 spatial_index_color(uint const index)
 {
     uint const color = pcg(index);
     return 0.25 + 0.75 * float3(color & 255u, (color >> 8u) & 255u, (color >> 16u) & 255u) / 255.0;
+}
+
+uint find_sharc_cell(spatial_hash_key const key)
+{
+    uint index = key.hash & VX_PATH_TRACE_SPATIAL_HASH_MASK;
+    for (uint probe = 0u; probe < VX_PATH_TRACE_SPATIAL_HASH_PROBE_COUNT; ++probe)
+    {
+        if (sharc_checksums[index] == key.checksum)
+        {
+            return index;
+        }
+        index = (index + 1u) & VX_PATH_TRACE_SPATIAL_HASH_MASK;
+    }
+    return VX_SPATIAL_HASH_INVALID_INDEX;
 }
 
 float4 main(ps_input const input) : SV_Target0
@@ -94,7 +109,8 @@ float4 main(ps_input const input) : SV_Target0
         uniforms.texture_type == VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_NORMAL ||
         uniforms.texture_type == VX_DISPLAY_TEXTURE_CELL_SIZE ||
-        uniforms.texture_type == VX_DISPLAY_TEXTURE_SPATIAL_INDEX)
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_SPATIAL_INDEX ||
+        uniforms.texture_type == VX_DISPLAY_TEXTURE_SHARC_CELLS)
     {
         if (surface_depth >= 1.0)
         {
@@ -122,6 +138,20 @@ float4 main(ps_input const input) : SV_Target0
             uint const index = spatial_index_tex.Load(texel).r;
             return index == 0xFFFFFFFFu ? CACHE_FAILURE_COLOR
                                         : float4(spatial_index_color(index), 1.0);
+        }
+        if (uniforms.texture_type == VX_DISPLAY_TEXTURE_SHARC_CELLS)
+        {
+            float3 const normal = unpack_normal(normal_tex.Load(texel).r);
+            float3 const position = reconstruct_position(uniforms.inverse_view_projection, pixel_uv,
+                                                         surface_depth, normal);
+            float const  cell_size = compute_cell_size(
+                max(length(position - uniforms.camera_pos.xyz), uniforms.smin),
+                uniforms.vertical_fov, uniforms.render_height, uniforms.sp, uniforms.smin);
+            spatial_hash_key const key = make_spatial_hash_key(position, normal, cell_size);
+            uint const             index = find_sharc_cell(key);
+            return index == VX_SPATIAL_HASH_INVALID_INDEX
+                       ? CACHE_FAILURE_COLOR
+                       : float4(spatial_index_color(key.checksum), 1.0);
         }
 
         float const visibility = visibility_tex.SampleLevel(visibility_sampler, pixel_uv, 0.0).r;

@@ -10,19 +10,22 @@
 #define VX_DISPLAY_TEXTURE_SKY_VIEW 5
 #define VX_DISPLAY_TEXTURE_PATH_TRACE 6
 #define VX_DISPLAY_TEXTURE_DEMODULATED_RADIANCE 7
+#define VX_DISPLAY_TEXTURE_SHARC_CELLS 8
 
 typedef struct display_uniforms
 {
-    uint  texture_type;
-    float near_plane;
-    float far_plane;
-    uint  grid_ext;
-    float sp;
-    float smin;
-    float vertical_fov;
-    uint  render_height;
-    float exposure;
-    uint  pad1;
-    uint  pad2;
-    uint  pad3;
+    uint     texture_type;
+    float    near_plane;
+    float    far_plane;
+    uint     grid_ext;
+    float    sp;
+    float    smin;
+    float    vertical_fov;
+    uint     render_height;
+    float    exposure;
+    uint     pad1;
+    uint     pad2;
+    uint     pad3;
+    float4   camera_pos;
+    float4x4 inverse_view_projection;
 } display_uniforms;

@@ -40,7 +40,7 @@
 #include <stdlib.h>
 
 static_assert(sizeof(float4x4) == 64, "float4x4 must match an HLSL column-major matrix");
-static_assert(sizeof(display_uniforms) == 48, "display uniform layout must match HLSL");
+static_assert(sizeof(display_uniforms) == 128, "display uniform layout must match HLSL");
 static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
 static_assert(sizeof(path_tracer_uniforms) == 144, "path-trace uniform layout must match HLSL");
 static_assert(sizeof(path_tracer_ray) == 32, "wavefront ray layout must match HLSL");
@@ -1954,7 +1954,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                  .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                  .num_samplers = 3,
                                                  .num_storage_textures = 3,
-                                                 .num_storage_buffers = 1,
+                                                 .num_storage_buffers = 2,
                                                  .num_uniform_buffers = 1};
         SDL_GPUShader* const          vertex_shader =
             SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
@@ -2442,6 +2442,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                              VX_DISPLAY_TEXTURE_PATH_TRACE);
         igRadioButton_IntPtr("Shading", &vxray_instance.display_texture,
                              VX_DISPLAY_TEXTURE_DEMODULATED_RADIANCE);
+        igRadioButton_IntPtr("SHARC cells", &vxray_instance.display_texture,
+                             VX_DISPLAY_TEXTURE_SHARC_CELLS);
         igRadioButton_IntPtr("Sky-view LUT", &vxray_instance.display_texture,
                              VX_DISPLAY_TEXTURE_SKY_VIEW);
     }
@@ -3081,7 +3083,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     };
     SDL_BindGPUFragmentStorageTextures(render_pass, 0, display_storage_textures,
                                        SDL_arraysize(display_storage_textures));
-    SDL_GPUBuffer* const display_storage_buffers[] = {vxray_instance.path_trace_output_buffer};
+    SDL_GPUBuffer* const display_storage_buffers[] = {
+        vxray_instance.path_trace_output_buffer,
+        vxray_instance.path_trace_checksum_buffer,
+    };
     SDL_BindGPUFragmentStorageBuffers(render_pass, 0, display_storage_buffers,
                                       SDL_arraysize(display_storage_buffers));
     float const            exposure = 1.f / powf(2.f, -(float)vxray_instance.exposure_stop);
@@ -3094,7 +3099,9 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         .smin = vxray_instance.spatial_hash_smin,
         .vertical_fov = fov,
         .render_height = height,
-        .exposure = exposure};
+        .exposure = exposure,
+        .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
+        .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection)};
     SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &display_uniform_data,
                                    sizeof(display_uniform_data));
     SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
