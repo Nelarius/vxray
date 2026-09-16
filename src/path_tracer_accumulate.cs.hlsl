@@ -1,35 +1,47 @@
 #include "path_tracer.h"
 
-#include "spatial_hash.hlsli"
+#include "sharc.hlsli"
 
-Texture2D<uint>                          albedo_tex : register(t0, space0);
-StructuredBuffer<uint>                   input_path_indices : register(t1, space0);
-StructuredBuffer<path_tracer_path_state> path_state_buffer : register(t2, space0);
-StructuredBuffer<uint>                   input_path_count : register(t3, space0);
+RWStructuredBuffer<uint>  hash_checksums : register(u0, space1);
+RWStructuredBuffer<uint4> sharc_accumulation : register(u1, space1);
+RWStructuredBuffer<uint4> sharc_resolved : register(u2, space1);
+RWStructuredBuffer<uint>  hash_frames : register(u3, space1);
 
-RWStructuredBuffer<uint4> hash_payloads : register(u0, space1);
+ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 
 [numthreads(VX_WAVEFRONT_EXTEND_THREAD_COUNT, 1, 1)] void
-main(uint const thread_id : SV_DispatchThreadID) {
-    if (thread_id >= input_path_count[0])
+main(uint const index : SV_DispatchThreadID) {
+    if (index >= VX_PATH_TRACE_SPATIAL_HASH_CAPACITY)
     {
         return;
     }
 
-    uint const                   path_index = input_path_indices[thread_id];
-    path_tracer_path_state const state = path_state_buffer[path_index];
-    uint const                   spatial_index = asuint(state.throughput_and_spatial_index.w);
+    uint4 const accumulated = sharc_accumulation[index];
+    if (accumulated.w > 0u)
+    {
+        uint4 const  previous = sharc_resolved[index];
+        float const  history_count = min((float)previous.w, (float)VX_SHARC_HISTORY_SAMPLE_COUNT);
+        float const  sample_count = (float)accumulated.w;
+        float3 const history = sharc_resolved_shading(previous);
+        float3 const sample =
+            decode_fixed_point(accumulated.xyz, VX_PATH_TRACE_MAX_SAMPLE_SHADING * sample_count,
+                               VX_PATH_TRACE_ACCUMULATION_SCALE) /
+            sample_count;
+        float const  total_count = history_count + sample_count;
+        float3 const resolved =
+            (history * history_count + sample * sample_count) / max(total_count, 1.0);
+        uint3 const encoded = encode_fixed_point(resolved, VX_PATH_TRACE_MAX_SAMPLE_SHADING,
+                                                 VX_PATH_TRACE_ACCUMULATION_SCALE);
+        sharc_resolved[index] =
+            uint4(encoded, min((uint)total_count, VX_SHARC_HISTORY_SAMPLE_COUNT));
+    }
+    else if (hash_checksums[index] != 0u &&
+             uniforms.frame - hash_frames[index] > VX_PATH_TRACE_SPATIAL_HASH_MAX_CELL_AGE)
+    {
+        sharc_resolved[index] = (uint4)0u;
+        hash_frames[index] = 0u;
+        hash_checksums[index] = 0u;
+    }
 
-    uint width, height;
-    albedo_tex.GetDimensions(width, height);
-    uint2 const  pixel = uint2(path_index % width, path_index / width);
-    float3 const albedo = unpack_albedo(albedo_tex.Load(int3(pixel, 0)).r).rgb;
-    float3 const shading = state.radiance.xyz / albedo;
-    uint3 const  encoded = encode_fixed_point(shading, VX_PATH_TRACE_MAX_SAMPLE_SHADING,
-                                              VX_PATH_TRACE_ACCUMULATION_SCALE);
-    uint         ex;
-    InterlockedAdd(hash_payloads[spatial_index].x, encoded.x, ex);
-    InterlockedAdd(hash_payloads[spatial_index].y, encoded.y, ex);
-    InterlockedAdd(hash_payloads[spatial_index].z, encoded.z, ex);
-    InterlockedAdd(hash_payloads[spatial_index].w, 1u, ex);
+    sharc_accumulation[index] = (uint4)0u;
 }

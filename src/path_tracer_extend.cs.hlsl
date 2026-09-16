@@ -1,7 +1,7 @@
 #include "path_tracer.h"
 #include "sky.h"
 
-#include "shared.hlsli"
+#include "sharc.hlsli"
 
 Texture2D<float4>                 sky_view_tex : register(t0, space0);
 Texture3D<uint>                   voxels : register(t1, space0);
@@ -14,12 +14,16 @@ Texture3D<uint>                   chunk_aadf : register(t7, space0);
 StructuredBuffer<uint>            palette_rgba : register(t8, space0);
 StructuredBuffer<path_tracer_ray> input_ray_buffer : register(t9, space0);
 StructuredBuffer<uint>            input_ray_count : register(t10, space0);
-StructuredBuffer<uint>            sample_ordinals : register(t11, space0);
+StructuredBuffer<uint4>           sharc_resolved : register(t11, space0);
 SamplerState                      sky_view_sampler : register(s0, space0);
 
 RWStructuredBuffer<path_tracer_ray>        output_ray_buffer : register(u0, space1);
 RWStructuredBuffer<uint>                   output_ray_count : register(u1, space1);
 RWStructuredBuffer<path_tracer_path_state> path_state_buffer : register(u2, space1);
+RWStructuredBuffer<uint>                   hash_checksums : register(u3, space1);
+RWStructuredBuffer<uint4>                  sharc_accumulation : register(u4, space1);
+RWStructuredBuffer<uint>                   hash_frames : register(u5, space1);
+RWStructuredBuffer<float4>                 path_trace_output : register(u6, space1);
 
 ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 
@@ -198,9 +202,16 @@ main(uint const thread_id : SV_DispatchThreadID) {
     if (packed_cell == VX_NO_CELL)
     {
         path_tracer_path_state state = path_state_buffer[path_index];
-        state.radiance.xyz += state.throughput_and_spatial_index.xyz *
-                              sky_radiance(ray_dir, uniforms.transmitted_sun_color.rgb);
-        path_state_buffer[path_index] = state;
+        float3 const           sky = sky_radiance(ray_dir, uniforms.transmitted_sun_color.rgb);
+        if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+        {
+            sharc_accumulate(state, sky, sharc_accumulation);
+        }
+        else
+        {
+            state.radiance.xyz += state.throughput_and_path_length.xyz * sky;
+            path_trace_output[path_index] = float4(state.radiance.xyz, 1.0);
+        }
         return;
     }
 
@@ -215,11 +226,57 @@ main(uint const thread_id : SV_DispatchThreadID) {
     float3 const   position = ray_origin + distance * ray_dir;
     float3 const   albedo = unpack_albedo(palette_rgba[voxels.Load(int4(cell, 0)).r]).rgb;
 
+    path_tracer_path_state state = path_state_buffer[path_index];
+    if (uniforms.mode == VX_PATH_TRACE_MODE_QUERY)
+    {
+        float const cell_size =
+            sharc_cell_size(position, uniforms.camera_pos.xyz, uniforms.sp, uniforms.smin,
+                            uniforms.vertical_fov, uniforms.render_height);
+        if (distance >= VX_SHARC_QUERY_MIN_SEGMENT_CELL_RATIO * cell_size)
+        {
+            spatial_hash_key const key = make_spatial_hash_key(position, normal, cell_size);
+            uint const             cache_index = sharc_find(key, hash_checksums);
+            if (cache_index != VX_SPATIAL_HASH_INVALID_INDEX)
+            {
+                uint4 const payload = sharc_resolved[cache_index];
+                if (payload.w > 0u)
+                {
+                    float3 const cached_radiance = sharc_resolved_shading(payload) * albedo;
+                    state.radiance.xyz += state.throughput_and_path_length.xyz * cached_radiance;
+                    path_trace_output[path_index] = float4(state.radiance.xyz, 1.0);
+                    return;
+                }
+            }
+        }
+    }
+    else
+    {
+        spatial_hash_key const key = sharc_key(position, normal, uniforms);
+        uint const             cache_index =
+            sharc_find_or_insert(key, uniforms.frame, hash_checksums, hash_frames);
+        if (cache_index != VX_SPATIAL_HASH_INVALID_INDEX)
+        {
+            sharc_append_vertex(state, cache_index, albedo);
+        }
+    }
+
+    if (uniforms.bounce >= VX_PATH_TRACE_BOUNCE_COUNT)
+    {
+        if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+        {
+            sharc_accumulate(state, (float3)0.0, sharc_accumulation);
+        }
+        else
+        {
+            path_trace_output[path_index] = float4(state.radiance.xyz, 1.0);
+        }
+        return;
+    }
+
     // Generate next direction (MIS, albertian and sun disk)
 
-    // Generation advances the next ordinal once; it stays unchanged throughout extension.
-    uint const   sample_index = sample_ordinals[path_index] - 1u;
-    float3 const samples = halton_sample_3d(sample_index, uniforms.bounce, path_index);
+    uint const   stream_id = path_index ^ (uniforms.mode * 0x9E3779B9u);
+    float3 const samples = halton_sample_3d(uniforms.frame, uniforms.bounce, stream_id);
     float2 const u = samples.xy;
     bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
@@ -231,15 +288,28 @@ main(uint const thread_id : SV_DispatchThreadID) {
     float const  n_dot_l = max(dot(normal, next_ray_dir), 0.0);
     if (n_dot_l == 0.0)
     {
+        if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+        {
+            sharc_accumulate(state, (float3)0.0, sharc_accumulation);
+        }
+        else
+        {
+            path_trace_output[path_index] = float4(state.radiance.xyz, 1.0);
+        }
         return;
     }
     float const pdf =
         0.5 * (pdf_cone(dot(uniforms.sun_direction.xyz, next_ray_dir), cos_theta_max) +
                pdf_cosine_weighted_hemisphere(n_dot_l));
-    path_tracer_path_state state = path_state_buffer[path_index];
-    float3                 throughput = state.throughput_and_spatial_index.xyz;
-    throughput *= albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6));
-    state.throughput_and_spatial_index.xyz = throughput;
+    float3 const throughput = albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6));
+    if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+    {
+        sharc_multiply_weights(state, throughput);
+    }
+    else
+    {
+        state.throughput_and_path_length.xyz *= throughput;
+    }
     path_state_buffer[path_index] = state;
 
     uint output_ray_index;

@@ -29,12 +29,6 @@ extern size_t const PATH_TRACER_EXTEND_CS_SIZE;
 extern uint8_t const PATH_TRACER_GENERATE_CS_BYTES[];
 extern size_t const PATH_TRACER_GENERATE_CS_SIZE;
 
-extern uint8_t const PATH_TRACER_INDEX_PS_BYTES[];
-extern size_t const PATH_TRACER_INDEX_PS_SIZE;
-
-extern uint8_t const PATH_TRACER_PREPARE_ACCUMULATE_CS_BYTES[];
-extern size_t const PATH_TRACER_PREPARE_ACCUMULATE_CS_SIZE;
-
 extern uint8_t const PATH_TRACER_PREPARE_EXTEND_CS_BYTES[];
 extern size_t const PATH_TRACER_PREPARE_EXTEND_CS_SIZE;
 

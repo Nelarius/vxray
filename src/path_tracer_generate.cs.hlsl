@@ -1,21 +1,20 @@
 #include "path_tracer.h"
 #include "sky.h"
 
-#include "spatial_hash.hlsli"
+#include "sharc.hlsli"
 
 Texture2D<float> depth_tex : register(t0, space0);
-Texture2D<uint>  spatial_index_tex : register(t1, space0);
-Texture2D<uint>  albedo_tex : register(t2, space0);
-Texture2D<uint>  normal_tex : register(t3, space0);
+Texture2D<uint>  albedo_tex : register(t1, space0);
+Texture2D<uint>  normal_tex : register(t2, space0);
 SamplerState     depth_sampler : register(s0, space0);
 
 RWStructuredBuffer<path_tracer_ray>        output_ray_buffer : register(u0, space1);
 RWStructuredBuffer<path_tracer_path_state> path_state_buffer : register(u1, space1);
 RWStructuredBuffer<uint>                   output_ray_count : register(u2, space1);
-RWStructuredBuffer<uint>                   output_path_indices : register(u3, space1);
-RWStructuredBuffer<uint>                   output_path_count : register(u4, space1);
-RWStructuredBuffer<uint4>                  hash_payloads : register(u5, space1);
-RWStructuredBuffer<uint>                   sample_ordinals : register(u6, space1);
+RWStructuredBuffer<uint>                   hash_checksums : register(u3, space1);
+RWStructuredBuffer<uint4>                  sharc_accumulation : register(u4, space1);
+RWStructuredBuffer<uint>                   hash_frames : register(u5, space1);
+RWStructuredBuffer<float4>                 path_trace_output : register(u6, space1);
 
 ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 
@@ -23,59 +22,49 @@ ConstantBuffer<path_tracer_uniforms> uniforms : register(b0, space2);
 main(uint2 const tid : SV_DispatchThreadID) {
     uint width, height;
     depth_tex.GetDimensions(width, height);
-    uint2 const pixel = tid;
+
+    uint2 pixel = tid;
+    if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+    {
+        uint const  k = VX_PATH_TRACE_UPDATE_TILE_SIZE;
+        uint2 const tile = tid;
+        uint const  phase = pcg(tile.x ^ pcg(tile.y)) % (k * k);
+        uint const  slot = (uniforms.frame % (k * k) + phase) % (k * k);
+        pixel = tile * k + uint2(slot % k, slot / k);
+    }
     if (pixel.x >= width || pixel.y >= height)
     {
         return;
     }
 
-    uint const spatial_index = spatial_index_tex.Load(int3(pixel, 0)).r;
-
+    uint const   path_index = pixel.y * width + pixel.x;
     float2 const uv = (float2(pixel) + 0.5) / float2(width, height);
     float const  depth = depth_tex.SampleLevel(depth_sampler, uv, 0.0).r;
-    if (depth >= 1.0 || spatial_index == VX_SPATIAL_HASH_INVALID_INDEX)
+    if (depth >= 1.0)
     {
         return;
     }
-
-    // Counts describe completed samples. Shared cells may admit several paths this frame,
-    // including duplicate bootstrap work and samples beyond the limit.
-    uint const count = hash_payloads[spatial_index].w;
-    if (count >= VX_PATH_TRACE_SAMPLE_LIMIT)
-    {
-        return;
-    }
-
-    if (count >= VX_PATH_TRACE_BOOTSTRAP_SAMPLE_COUNT)
-    {
-        uint const  k = VX_PATH_TRACE_UPDATE_TILE_SIZE;
-        uint2 const tile = pixel / k;
-        uint const  phase = pcg(tile.x ^ pcg(tile.y)) % (k * k);
-        uint const  slot = (uniforms.frame % (k * k) + phase) % (k * k);
-        if (any(pixel % k != uint2(slot % k, slot / k)))
-        {
-            return;
-        }
-    }
-
-    uint const path_index = pixel.y * width + pixel.x;
-    uint       output_path_index;
-    InterlockedAdd(output_path_count[0], 1u, output_path_index);
-    output_path_indices[output_path_index] = path_index;
-
-    // One writer per pixel. Advance for every admitted path, including zero-radiance samples.
-    uint const sample_index = sample_ordinals[path_index];
-    sample_ordinals[path_index] = sample_index + 1u;
 
     float3 const normal = unpack_normal(normal_tex.Load(int3(pixel, 0)).r);
     float3 const position =
         reconstruct_position(uniforms.inverse_view_projection, uv, depth, normal);
     float3 const albedo = unpack_albedo(albedo_tex.Load(int3(pixel, 0)).r).rgb;
-    float3       throughput = (float3)1.0;
 
-    // Generate next direction (MIS, albertian and sun disk)
+    path_tracer_path_state state = (path_tracer_path_state)0;
+    if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+    {
+        spatial_hash_key const key = sharc_key(position, normal, uniforms);
+        uint const             cache_index =
+            sharc_find_or_insert(key, uniforms.frame, hash_checksums, hash_frames);
+        if (cache_index == VX_SPATIAL_HASH_INVALID_INDEX)
+        {
+            return;
+        }
+        sharc_append_vertex(state, cache_index, albedo);
+    }
 
-    float3 const samples = halton_sample_3d(sample_index, 0u, path_index);
+    uint const   stream_id = path_index ^ (uniforms.mode * 0x9E3779B9u);
+    float3 const samples = halton_sample_3d(uniforms.frame, 0u, stream_id);
     float2 const u = samples.xy;
     bool const   sample_sun = samples.z < 0.5;
     float const  cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD);
@@ -85,21 +74,31 @@ main(uint2 const tid : SV_DispatchThreadID) {
                                ? orient_sample_direction(local_dir, uniforms.sun_direction.xyz)
                                : orient_axis_aligned_sample_direction(local_dir, normal);
     float const  n_dot_l = max(dot(normal, ray_dir), 0.0);
-    if (n_dot_l != 0.0)
-    {
-        float const pdf = 0.5 * (pdf_cone(dot(uniforms.sun_direction.xyz, ray_dir), cos_theta_max) +
-                                 pdf_cosine_weighted_hemisphere(n_dot_l));
-        throughput *= albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6));
-    }
-    path_tracer_path_state state;
-    state.throughput_and_spatial_index = float4(throughput, asfloat(spatial_index));
-    state.radiance = float4((float3)0.0, 0.0);
-    path_state_buffer[path_index] = state;
-    // Keep zero-radiance paths in the accumulation queue so they count as completed samples.
     if (n_dot_l == 0.0)
     {
+        if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+        {
+            sharc_accumulate(state, (float3)0.0, sharc_accumulation);
+        }
+        else
+        {
+            path_trace_output[path_index] = (float4)0.0;
+        }
         return;
     }
+
+    float const  pdf = 0.5 * (pdf_cone(dot(uniforms.sun_direction.xyz, ray_dir), cos_theta_max) +
+                              pdf_cosine_weighted_hemisphere(n_dot_l));
+    float3 const throughput = albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6));
+    if (uniforms.mode == VX_PATH_TRACE_MODE_UPDATE)
+    {
+        sharc_multiply_weights(state, throughput);
+    }
+    else
+    {
+        state.throughput_and_path_length.xyz = throughput;
+    }
+    path_state_buffer[path_index] = state;
 
     uint ray_index;
     InterlockedAdd(output_ray_count[0], 1u, ray_index);

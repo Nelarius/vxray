@@ -9,13 +9,13 @@ struct ps_input
     float4 position : SV_Position;
 };
 
-Texture2D<float>        depth_tex : register(t0, space2);
-Texture2D<float>        visibility_tex : register(t1, space2);
-Texture2D<float4>       sky_view_tex : register(t2, space2);
-Texture2D<uint>         albedo_tex : register(t3, space2);
-Texture2D<uint>         normal_tex : register(t4, space2);
-Texture2D<uint>         spatial_index_tex : register(t5, space2);
-StructuredBuffer<uint4> path_trace_payloads : register(t6, space2);
+Texture2D<float>         depth_tex : register(t0, space2);
+Texture2D<float>         visibility_tex : register(t1, space2);
+Texture2D<float4>        sky_view_tex : register(t2, space2);
+Texture2D<uint>          albedo_tex : register(t3, space2);
+Texture2D<uint>          normal_tex : register(t4, space2);
+Texture2D<uint>          spatial_index_tex : register(t5, space2);
+StructuredBuffer<float4> path_trace_output : register(t6, space2);
 
 SamplerState depth_sampler : register(s0, space2);
 SamplerState visibility_sampler : register(s1, space2);
@@ -76,26 +76,18 @@ float4 main(ps_input const input) : SV_Target0
             return BACKGROUND_COLOR;
         }
 
-        int3 const texel = int3(pixel, 0);
-        uint const spatial_index = spatial_index_tex.Load(texel).r;
-        if (spatial_index == VX_SPATIAL_HASH_INVALID_INDEX)
-        {
-            return CACHE_FAILURE_COLOR;
-        }
-
-        uint4 const  payload = path_trace_payloads[spatial_index];
-        float const  sample_count = max((float)payload.w, 1.0);
-        float3 const shading =
-            decode_fixed_point(payload.xyz, VX_PATH_TRACE_MAX_SAMPLE_SHADING * sample_count,
-                               VX_PATH_TRACE_ACCUMULATION_SCALE) /
-            sample_count;
+        int3 const   texel = int3(pixel, 0);
+        uint const   path_index = pixel.y * width + pixel.x;
+        float3 const radiance = path_trace_output[path_index].rgb;
         if (uniforms.texture_type == VX_DISPLAY_TEXTURE_DEMODULATED_RADIANCE)
         {
+            float3 const albedo = unpack_albedo(albedo_tex.Load(texel).r).rgb;
+            float3 const shading = radiance * float3(albedo.x > 1e-6 ? rcp(albedo.x) : 0.0,
+                                                     albedo.y > 1e-6 ? rcp(albedo.y) : 0.0,
+                                                     albedo.z > 1e-6 ? rcp(albedo.z) : 0.0);
             return float4(aces_filmic(uniforms.exposure * shading), 1.0);
         }
-        float3 const albedo = unpack_albedo(albedo_tex.Load(texel).r).rgb;
-
-        return float4(aces_filmic(uniforms.exposure * shading * albedo), 1.0);
+        return float4(aces_filmic(uniforms.exposure * radiance), 1.0);
     }
     float const surface_depth = depth_tex.SampleLevel(depth_sampler, pixel_uv, 0.0).r;
     if (uniforms.texture_type == VX_DISPLAY_TEXTURE_ALBEDO ||

@@ -42,35 +42,24 @@
 static_assert(sizeof(float4x4) == 64, "float4x4 must match an HLSL column-major matrix");
 static_assert(sizeof(display_uniforms) == 48, "display uniform layout must match HLSL");
 static_assert(sizeof(gbuffer_uniforms) == 160, "G-buffer uniform layout must match HLSL");
-static_assert(sizeof(path_tracer_index_uniforms) == 160,
-              "path-trace index uniform layout must match HLSL");
-static_assert(sizeof(path_tracer_uniforms) == 128, "path-trace uniform layout must match HLSL");
+static_assert(sizeof(path_tracer_uniforms) == 144, "path-trace uniform layout must match HLSL");
 static_assert(sizeof(path_tracer_ray) == 32, "wavefront ray layout must match HLSL");
-static_assert(sizeof(path_tracer_path_state) == 32, "wavefront path-state layout must match HLSL");
-static_assert(VX_PATH_TRACE_UPDATE_TILE_SIZE > 0u,
-              "path-trace update tiles must have positive size");
-static_assert(VX_PATH_TRACE_BOOTSTRAP_SAMPLE_COUNT > 0u &&
-                  VX_PATH_TRACE_BOOTSTRAP_SAMPLE_COUNT <= VX_PATH_TRACE_SAMPLE_LIMIT,
-              "path-trace bootstrap count must be within the sample limit");
+static_assert(sizeof(path_tracer_path_state) == 96, "wavefront path-state layout must match HLSL");
+static_assert(VX_PATH_TRACE_UPDATE_TILE_SIZE == 4u || VX_PATH_TRACE_UPDATE_TILE_SIZE == 5u,
+              "SHARC updates must use 4x4 or 5x5 tiles");
+static_assert(VX_SHARC_PROPAGATION_DEPTH > 0u, "SHARC propagation must retain at least one vertex");
+static_assert((VX_PATH_TRACE_SPATIAL_HASH_CAPACITY & (VX_PATH_TRACE_SPATIAL_HASH_CAPACITY - 1u)) ==
+                  0u,
+              "SHARC cache capacity must be a power of two");
 static_assert(sizeof(rtao_uniforms) == 192, "RTAO uniform layout must match HLSL");
 static_assert(sizeof(sky_view_uniforms) == 48, "sky-view uniform layout must match HLSL");
 static_assert((VX_RTAO_SPATIAL_HASH_TOUCH_PERIOD & (VX_RTAO_SPATIAL_HASH_TOUCH_PERIOD - 1u)) == 0u,
               "RTAO spatial hash touch period must be a power of two");
 static_assert(VX_RTAO_SPATIAL_HASH_TOUCH_PERIOD <= VX_RTAO_SPATIAL_HASH_MAX_CELL_AGE,
               "RTAO spatial hash entries must be touched before they expire");
-static_assert((VX_PATH_TRACE_SPATIAL_HASH_TOUCH_PERIOD &
-               (VX_PATH_TRACE_SPATIAL_HASH_TOUCH_PERIOD - 1u)) == 0u,
-              "path-trace spatial hash touch period must be a power of two");
-static_assert(VX_PATH_TRACE_SPATIAL_HASH_TOUCH_PERIOD <= VX_PATH_TRACE_SPATIAL_HASH_MAX_CELL_AGE,
-              "path-trace spatial hash entries must be touched before they expire");
 // Increase the Halton prime switch cases in shared.hlsli before increasing the bounce count.
 static_assert(VX_PATH_TRACE_BOUNCE_COUNT <= 4u,
               "path-trace bounce count exceeds the Halton prime table");
-// The maximum fixed-point path-trace accumulation must fit in each uint payload channel.
-static_assert(VX_PATH_TRACE_SAMPLE_LIMIT <=
-                  UINT32_MAX / VX_PATH_TRACE_MAX_SAMPLE_SHADING / VX_PATH_TRACE_ACCUMULATION_SCALE,
-              "maximum path-trace accumulation must fit in uint32_t");
-
 typedef struct vx_aadf_uniforms
 {
     uint32_t grid_ext;
@@ -1116,13 +1105,10 @@ typedef struct vxray
     uint32_t  rtao_frame_index;
     uint32_t  path_trace_frame;
     float4x4  rtao_previous_view_projection;
-    float4x4  path_trace_previous_view_projection;
     bool      rtao_history_valid;
-    bool      path_trace_history_valid;
     bool      rtao_spatial_hash_dirty;
     bool      path_trace_spatial_hash_dirty;
     bool      path_trace_lighting_dirty;
-    bool      path_trace_sample_ordinals_dirty;
 
     // Voxel grid
     int grid_ext;
@@ -1131,10 +1117,8 @@ typedef struct vxray
     SDL_GPUGraphicsPipeline* gbuffer_pipeline;
     SDL_GPUGraphicsPipeline* rtao_index_pipeline;
     SDL_GPUGraphicsPipeline* rtao_pipeline;
-    SDL_GPUGraphicsPipeline* path_trace_index_pipeline;
     SDL_GPUComputePipeline*  wavefront_generate_pipeline;
     SDL_GPUComputePipeline*  wavefront_prepare_extend_pipeline;
-    SDL_GPUComputePipeline*  wavefront_prepare_accumulate_pipeline;
     SDL_GPUComputePipeline*  wavefront_extend_pipeline;
     SDL_GPUComputePipeline*  wavefront_accumulate_pipeline;
     SDL_GPUGraphicsPipeline* sky_view_pipeline;
@@ -1152,8 +1136,6 @@ typedef struct vxray
     SDL_GPUTexture*          rtao_index_textures[2];
     SDL_GPUTexture*          rtao_checksum_textures[2];
     SDL_GPUTexture*          rtao_visibility_texture;
-    SDL_GPUTexture*          path_trace_index_textures[2];
-    SDL_GPUTexture*          path_trace_checksum_textures[2];
     SDL_GPUTexture*          sky_view_texture;
     uint32_t                 render_width;
     uint32_t                 render_height;
@@ -1165,14 +1147,13 @@ typedef struct vxray
     SDL_GPUBuffer*           ao_last_touched_frame_buffer;
     SDL_GPUBuffer*           path_trace_checksum_buffer;
     SDL_GPUBuffer*           path_trace_payload_buffer;
+    SDL_GPUBuffer*           path_trace_resolved_buffer;
     SDL_GPUBuffer*           path_trace_last_touched_frame_buffer;
     SDL_GPUBuffer*           wavefront_ray_buffers[2];
     SDL_GPUBuffer*           wavefront_ray_count_buffers[2];
     SDL_GPUBuffer*           wavefront_path_state_buffer;
-    SDL_GPUBuffer*           path_trace_sample_ordinals_buffer;
-    SDL_GPUBuffer*           wavefront_path_indices_buffer;
-    SDL_GPUBuffer*           wavefront_path_count_buffer;
     SDL_GPUBuffer*           wavefront_indirect_dispatch_buffer;
+    SDL_GPUBuffer*           path_trace_output_buffer;
     SDL_GPUTransferBuffer*   spatial_hash_reset_transfer_buffer;
 } vxray;
 
@@ -1187,17 +1168,12 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         vxray_instance.gbuffer_depth_texture && vxray_instance.rtao_index_textures[0] &&
         vxray_instance.rtao_index_textures[1] && vxray_instance.rtao_checksum_textures[0] &&
         vxray_instance.rtao_checksum_textures[1] && vxray_instance.rtao_visibility_texture &&
-        vxray_instance.path_trace_index_textures[0] &&
-        vxray_instance.path_trace_index_textures[1] &&
-        vxray_instance.path_trace_checksum_textures[0] &&
-        vxray_instance.path_trace_checksum_textures[1] && vxray_instance.wavefront_ray_buffers[0] &&
-        vxray_instance.wavefront_ray_buffers[1] && vxray_instance.wavefront_ray_count_buffers[0] &&
+        vxray_instance.wavefront_ray_buffers[0] && vxray_instance.wavefront_ray_buffers[1] &&
+        vxray_instance.wavefront_ray_count_buffers[0] &&
         vxray_instance.wavefront_ray_count_buffers[1] &&
         vxray_instance.wavefront_path_state_buffer &&
-        vxray_instance.path_trace_sample_ordinals_buffer &&
-        vxray_instance.wavefront_path_indices_buffer &&
-        vxray_instance.wavefront_path_count_buffer &&
-        vxray_instance.wavefront_indirect_dispatch_buffer && vxray_instance.render_width == width &&
+        vxray_instance.wavefront_indirect_dispatch_buffer &&
+        vxray_instance.path_trace_output_buffer && vxray_instance.render_width == width &&
         vxray_instance.render_height == height)
     {
         return true;
@@ -1307,43 +1283,6 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         }
     }
 
-    char const* const path_trace_index_texture_names[] = {"path-tracer-index-0",
-                                                          "path-tracer-index-1"};
-    char const* const path_trace_checksum_texture_names[] = {"path-tracer-checksum-0",
-                                                             "path-tracer-checksum-1"};
-    SDL_GPUTexture*   path_trace_index_textures[2] = {0};
-    SDL_GPUTexture*   path_trace_checksum_textures[2] = {0};
-    for (uint32_t i = 0u; i < 2u; ++i)
-    {
-        path_trace_index_textures[i] = vx_create_gpu_texture(
-            vxray_instance.gpu_device, history_texture_info, path_trace_index_texture_names[i]);
-        path_trace_checksum_textures[i] = vx_create_gpu_texture(
-            vxray_instance.gpu_device, history_texture_info, path_trace_checksum_texture_names[i]);
-        if (!path_trace_index_textures[i] || !path_trace_checksum_textures[i])
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create path-trace history textures: %s",
-                         SDL_GetError());
-            for (uint32_t j = 0u; j < 2u; ++j)
-            {
-                if (path_trace_checksum_textures[j])
-                {
-                    SDL_ReleaseGPUTexture(vxray_instance.gpu_device,
-                                          path_trace_checksum_textures[j]);
-                }
-                if (path_trace_index_textures[j])
-                {
-                    SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_index_textures[j]);
-                }
-                SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_checksum_textures[j]);
-                SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_index_textures[j]);
-            }
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_depth_texture);
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_normal_texture);
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, gbuffer_albedo_texture);
-            return false;
-        }
-    }
-
     SDL_GPUTexture* const rtao_visibility_texture = vx_create_gpu_texture(
         vxray_instance.gpu_device,
         (SDL_GPUTextureCreateInfo){.type = SDL_GPU_TEXTURETYPE_2D,
@@ -1362,8 +1301,6 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
                      SDL_GetError());
         for (uint32_t i = 0u; i < 2u; ++i)
         {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_checksum_textures[i]);
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_index_textures[i]);
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_checksum_textures[i]);
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_index_textures[i]);
         }
@@ -1381,8 +1318,6 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_visibility_texture);
         for (uint32_t i = 0u; i < 2u; ++i)
         {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_checksum_textures[i]);
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_index_textures[i]);
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_checksum_textures[i]);
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_index_textures[i]);
         }
@@ -1414,18 +1349,12 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     path_state_buffer_info.size = (uint32_t)(pixel_count * sizeof(path_tracer_path_state));
     SDL_GPUBuffer* const wavefront_path_state_buffer = vx_create_gpu_buffer(
         vxray_instance.gpu_device, path_state_buffer_info, "wavefront-path-state");
-    SDL_GPUBufferCreateInfo path_indices_buffer_info = wavefront_buffer_info;
-    path_indices_buffer_info.size = (uint32_t)(pixel_count * sizeof(uint32_t));
-    SDL_GPUBuffer* const wavefront_path_indices_buffer = vx_create_gpu_buffer(
-        vxray_instance.gpu_device, path_indices_buffer_info, "wavefront-path-indices");
-    SDL_GPUBuffer* const path_trace_sample_ordinals_buffer = vx_create_gpu_buffer(
-        vxray_instance.gpu_device, path_indices_buffer_info, "path-trace-sample-ordinals");
-    SDL_GPUBuffer* const wavefront_path_count_buffer = vx_create_gpu_buffer(
-        vxray_instance.gpu_device,
-        (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
-                                           SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
-                                  .size = sizeof(uint32_t)},
-        "wavefront-path-count");
+    SDL_GPUBufferCreateInfo path_trace_output_buffer_info = wavefront_buffer_info;
+    path_trace_output_buffer_info.usage =
+        SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+    path_trace_output_buffer_info.size = (uint32_t)(pixel_count * sizeof(float4));
+    SDL_GPUBuffer* const path_trace_output_buffer = vx_create_gpu_buffer(
+        vxray_instance.gpu_device, path_trace_output_buffer_info, "path-trace-output");
     SDL_GPUBuffer* const wavefront_indirect_dispatch_buffer = vx_create_gpu_buffer(
         vxray_instance.gpu_device,
         (SDL_GPUBufferCreateInfo){.usage = SDL_GPU_BUFFERUSAGE_INDIRECT |
@@ -1434,8 +1363,7 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         "wavefront-indirect-dispatch");
     if (!wavefront_ray_buffers[0] || !wavefront_ray_buffers[1] || !wavefront_ray_count_buffers[0] ||
         !wavefront_ray_count_buffers[1] || !wavefront_path_state_buffer ||
-        !wavefront_path_indices_buffer || !wavefront_path_count_buffer ||
-        !wavefront_indirect_dispatch_buffer || !path_trace_sample_ordinals_buffer)
+        !wavefront_indirect_dispatch_buffer || !path_trace_output_buffer)
     {
         SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create wavefront buffers: %s",
                      SDL_GetError());
@@ -1447,17 +1375,9 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         {
             SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, wavefront_path_state_buffer);
         }
-        if (path_trace_sample_ordinals_buffer)
+        if (path_trace_output_buffer)
         {
-            SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, path_trace_sample_ordinals_buffer);
-        }
-        if (wavefront_path_count_buffer)
-        {
-            SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, wavefront_path_count_buffer);
-        }
-        if (wavefront_path_indices_buffer)
-        {
-            SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, wavefront_path_indices_buffer);
+            SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, path_trace_output_buffer);
         }
         for (uint32_t i = 0u; i < 2u; ++i)
         {
@@ -1473,8 +1393,6 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_visibility_texture);
         for (uint32_t i = 0u; i < 2u; ++i)
         {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_checksum_textures[i]);
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device, path_trace_index_textures[i]);
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_checksum_textures[i]);
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, rtao_index_textures[i]);
         }
@@ -1507,16 +1425,6 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
         {
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_index_textures[i]);
         }
-        if (vxray_instance.path_trace_checksum_textures[i])
-        {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device,
-                                  vxray_instance.path_trace_checksum_textures[i]);
-        }
-        if (vxray_instance.path_trace_index_textures[i])
-        {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device,
-                                  vxray_instance.path_trace_index_textures[i]);
-        }
     }
     if (vxray_instance.rtao_visibility_texture)
     {
@@ -1531,19 +1439,9 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     {
         SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.wavefront_path_state_buffer);
     }
-    if (vxray_instance.path_trace_sample_ordinals_buffer)
+    if (vxray_instance.path_trace_output_buffer)
     {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device,
-                             vxray_instance.path_trace_sample_ordinals_buffer);
-    }
-    if (vxray_instance.wavefront_path_count_buffer)
-    {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.wavefront_path_count_buffer);
-    }
-    if (vxray_instance.wavefront_path_indices_buffer)
-    {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device,
-                             vxray_instance.wavefront_path_indices_buffer);
+        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.path_trace_output_buffer);
     }
     for (uint32_t i = 0u; i < 2u; ++i)
     {
@@ -1565,22 +1463,16 @@ static bool vx_ensure_render_textures(uint32_t const width, uint32_t const heigh
     {
         vxray_instance.rtao_index_textures[i] = rtao_index_textures[i];
         vxray_instance.rtao_checksum_textures[i] = rtao_checksum_textures[i];
-        vxray_instance.path_trace_index_textures[i] = path_trace_index_textures[i];
-        vxray_instance.path_trace_checksum_textures[i] = path_trace_checksum_textures[i];
         vxray_instance.wavefront_ray_buffers[i] = wavefront_ray_buffers[i];
         vxray_instance.wavefront_ray_count_buffers[i] = wavefront_ray_count_buffers[i];
     }
     vxray_instance.rtao_visibility_texture = rtao_visibility_texture;
     vxray_instance.wavefront_path_state_buffer = wavefront_path_state_buffer;
-    vxray_instance.path_trace_sample_ordinals_buffer = path_trace_sample_ordinals_buffer;
-    vxray_instance.path_trace_sample_ordinals_dirty = true;
-    vxray_instance.wavefront_path_indices_buffer = wavefront_path_indices_buffer;
-    vxray_instance.wavefront_path_count_buffer = wavefront_path_count_buffer;
+    vxray_instance.path_trace_output_buffer = path_trace_output_buffer;
     vxray_instance.wavefront_indirect_dispatch_buffer = wavefront_indirect_dispatch_buffer;
     vxray_instance.render_width = width;
     vxray_instance.render_height = height;
     vxray_instance.rtao_history_valid = false;
-    vxray_instance.path_trace_history_valid = false;
     return true;
 }
 
@@ -1902,70 +1794,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
         }
     }
 
-    // Path-tracing spatial-cache index pipeline
-
-    {
-        SDL_GPUShaderCreateInfo const vs_info = {.code_size = FULLSCREEN_VS_SIZE,
-                                                 .code = FULLSCREEN_VS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_VERTEX};
-        SDL_GPUShaderCreateInfo const ps_info = {.code_size = PATH_TRACER_INDEX_PS_SIZE,
-                                                 .code = PATH_TRACER_INDEX_PS_BYTES,
-                                                 .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                                 .format = GPU_SHADER_FORMAT,
-                                                 .stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 .num_samplers = 1,
-                                                 .num_storage_textures = 3,
-                                                 .num_storage_buffers = 3,
-                                                 .num_uniform_buffers = 1};
-        SDL_GPUShader* const          vertex_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &vs_info);
-        SDL_GPUShader* const fragment_shader =
-            SDL_CreateGPUShader(vxray_instance.gpu_device, &ps_info);
-        if (!vertex_shader || !fragment_shader)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create path-trace index shaders: %s",
-                         SDL_GetError());
-            if (fragment_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-            }
-            if (vertex_shader)
-            {
-                SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-            }
-            return SDL_APP_FAILURE;
-        }
-
-        vxray_instance.path_trace_index_pipeline = vx_create_gpu_graphics_pipeline(
-            vxray_instance.gpu_device,
-            (SDL_GPUGraphicsPipelineCreateInfo){
-                .vertex_shader = vertex_shader,
-                .fragment_shader = fragment_shader,
-                .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
-                .rasterizer_state =
-                    (SDL_GPURasterizerState){.fill_mode = SDL_GPU_FILLMODE_FILL,
-                                             .cull_mode = SDL_GPU_CULLMODE_BACK,
-                                             .front_face = SDL_GPU_FRONTFACE_CLOCKWISE},
-                .target_info =
-                    (SDL_GPUGraphicsPipelineTargetInfo){
-                        .num_color_targets = 2,
-                        .color_target_descriptions =
-                            (SDL_GPUColorTargetDescription[]){
-                                {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT},
-                                {.format = SDL_GPU_TEXTUREFORMAT_R32_UINT}}}},
-            "path-tracer-index-raster");
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, fragment_shader);
-        SDL_ReleaseGPUShader(vxray_instance.gpu_device, vertex_shader);
-        if (!vxray_instance.path_trace_index_pipeline)
-        {
-            SDL_LogError(SDL_LOG_CATEGORY_GPU, "Couldn't create path-trace index pipeline: %s",
-                         SDL_GetError());
-            return SDL_APP_FAILURE;
-        }
-    }
-
     // Wavefront path-tracing pipelines
 
     {
@@ -1976,7 +1804,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                .format = GPU_SHADER_FORMAT,
                                                .num_samplers = 1,
-                                               .num_readonly_storage_textures = 3,
+                                               .num_readonly_storage_textures = 2,
                                                .num_readwrite_storage_buffers = 7,
                                                .num_uniform_buffers = 1,
                                                .threadcount_x = VX_WAVEFRONT_SCREEN_THREAD_COUNT,
@@ -1995,18 +1823,6 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                .threadcount_y = 1,
                                                .threadcount_z = 1},
             "wavefront-prepare-extend");
-        vxray_instance.wavefront_prepare_accumulate_pipeline = vx_create_gpu_compute_pipeline(
-            vxray_instance.gpu_device,
-            (SDL_GPUComputePipelineCreateInfo){.code_size = PATH_TRACER_PREPARE_ACCUMULATE_CS_SIZE,
-                                               .code = PATH_TRACER_PREPARE_ACCUMULATE_CS_BYTES,
-                                               .entrypoint = GPU_SHADER_ENTRYPOINT,
-                                               .format = GPU_SHADER_FORMAT,
-                                               .num_readonly_storage_buffers = 1,
-                                               .num_readwrite_storage_buffers = 1,
-                                               .threadcount_x = 1,
-                                               .threadcount_y = 1,
-                                               .threadcount_z = 1},
-            "wavefront-prepare-accumulate");
         vxray_instance.wavefront_extend_pipeline = vx_create_gpu_compute_pipeline(
             vxray_instance.gpu_device,
             (SDL_GPUComputePipelineCreateInfo){.code_size = PATH_TRACER_EXTEND_CS_SIZE,
@@ -2016,7 +1832,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                .num_samplers = 1,
                                                .num_readonly_storage_textures = 7,
                                                .num_readonly_storage_buffers = 4,
-                                               .num_readwrite_storage_buffers = 3,
+                                               .num_readwrite_storage_buffers = 7,
                                                .num_uniform_buffers = 1,
                                                .threadcount_x = VX_WAVEFRONT_EXTEND_THREAD_COUNT,
                                                .threadcount_y = 1,
@@ -2028,16 +1844,14 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                                .code = PATH_TRACER_ACCUMULATE_CS_BYTES,
                                                .entrypoint = GPU_SHADER_ENTRYPOINT,
                                                .format = GPU_SHADER_FORMAT,
-                                               .num_readonly_storage_textures = 1,
-                                               .num_readonly_storage_buffers = 3,
-                                               .num_readwrite_storage_buffers = 1,
+                                               .num_readwrite_storage_buffers = 4,
+                                               .num_uniform_buffers = 1,
                                                .threadcount_x = VX_WAVEFRONT_EXTEND_THREAD_COUNT,
                                                .threadcount_y = 1,
                                                .threadcount_z = 1},
             "wavefront-accumulate");
         if (!vxray_instance.wavefront_generate_pipeline ||
             !vxray_instance.wavefront_prepare_extend_pipeline ||
-            !vxray_instance.wavefront_prepare_accumulate_pipeline ||
             !vxray_instance.wavefront_extend_pipeline ||
             !vxray_instance.wavefront_accumulate_pipeline)
         {
@@ -2385,10 +2199,12 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     device, path_trace_buffer_info, "path-tracer-spatial-last-touched-frame");
                 path_trace_buffer_info.size = path_trace_payload_buffer_size;
                 SDL_GPUBuffer* const path_trace_payload_buffer =
-                    vx_create_gpu_buffer(device, path_trace_buffer_info, "path-tracer-payload");
+                    vx_create_gpu_buffer(device, path_trace_buffer_info, "sharc-accumulation");
+                SDL_GPUBuffer* const path_trace_resolved_buffer =
+                    vx_create_gpu_buffer(device, path_trace_buffer_info, "sharc-resolved");
                 if (!ao_checksum_buffer || !ao_payload_buffer || !ao_last_touched_frame_buffer ||
                     !path_trace_checksum_buffer || !path_trace_payload_buffer ||
-                    !path_trace_last_touched_frame_buffer)
+                    !path_trace_resolved_buffer || !path_trace_last_touched_frame_buffer)
                 {
                     SDL_LogError(SDL_LOG_CATEGORY_GPU, "Failed to create spatial hash buffers: %s",
                                  SDL_GetError());
@@ -2399,6 +2215,10 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                     if (path_trace_payload_buffer)
                     {
                         SDL_ReleaseGPUBuffer(device, path_trace_payload_buffer);
+                    }
+                    if (path_trace_resolved_buffer)
+                    {
+                        SDL_ReleaseGPUBuffer(device, path_trace_resolved_buffer);
                     }
                     if (path_trace_checksum_buffer)
                     {
@@ -2431,6 +2251,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                  "Failed to create spatial-cache reset transfer buffer: %s",
                                  SDL_GetError());
                     SDL_ReleaseGPUBuffer(device, path_trace_last_touched_frame_buffer);
+                    SDL_ReleaseGPUBuffer(device, path_trace_resolved_buffer);
                     SDL_ReleaseGPUBuffer(device, path_trace_payload_buffer);
                     SDL_ReleaseGPUBuffer(device, path_trace_checksum_buffer);
                     SDL_ReleaseGPUBuffer(device, ao_last_touched_frame_buffer);
@@ -2446,6 +2267,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                                  "Failed to map spatial-cache reset buffer: %s", SDL_GetError());
                     SDL_ReleaseGPUTransferBuffer(device, reset_transfer);
                     SDL_ReleaseGPUBuffer(device, path_trace_last_touched_frame_buffer);
+                    SDL_ReleaseGPUBuffer(device, path_trace_resolved_buffer);
                     SDL_ReleaseGPUBuffer(device, path_trace_payload_buffer);
                     SDL_ReleaseGPUBuffer(device, path_trace_checksum_buffer);
                     SDL_ReleaseGPUBuffer(device, ao_last_touched_frame_buffer);
@@ -2462,6 +2284,7 @@ SDL_AppResult SDL_AppInit(void** const appstate, int const argc, char* argv[])
                 vxray_instance.ao_last_touched_frame_buffer = ao_last_touched_frame_buffer;
                 vxray_instance.path_trace_checksum_buffer = path_trace_checksum_buffer;
                 vxray_instance.path_trace_payload_buffer = path_trace_payload_buffer;
+                vxray_instance.path_trace_resolved_buffer = path_trace_resolved_buffer;
                 vxray_instance.path_trace_last_touched_frame_buffer =
                     path_trace_last_touched_frame_buffer;
                 vxray_instance.spatial_hash_reset_transfer_buffer = reset_transfer;
@@ -2610,6 +2433,8 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         igRadioButton_IntPtr("Shaded", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_ALBEDO);
         igRadioButton_IntPtr("Ambient visibility", &vxray_instance.display_texture,
                              VX_DISPLAY_TEXTURE_AMBIENT_VISIBILITY);
+        igRadioButton_IntPtr("Spatial index", &vxray_instance.display_texture,
+                             VX_DISPLAY_TEXTURE_SPATIAL_INDEX);
     }
     else
     {
@@ -2623,8 +2448,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     igRadioButton_IntPtr("Normal", &vxray_instance.display_texture, VX_DISPLAY_TEXTURE_NORMAL);
     igRadioButton_IntPtr("Cell size", &vxray_instance.display_texture,
                          VX_DISPLAY_TEXTURE_CELL_SIZE);
-    igRadioButton_IntPtr("Spatial index", &vxray_instance.display_texture,
-                         VX_DISPLAY_TEXTURE_SPATIAL_INDEX);
     bool invalidate_ao = false;
     if (vxray_instance.shading_mode == VX_SHADING_RTAO)
     {
@@ -2743,9 +2566,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     bool const reset_path_trace_hash = !render_rtao && vxray_instance.path_trace_spatial_hash_dirty;
     bool const reset_path_trace_payload =
         !render_rtao && (reset_path_trace_hash || vxray_instance.path_trace_lighting_dirty);
-    bool const reset_path_trace_sample_ordinals =
-        !render_rtao &&
-        (vxray_instance.path_trace_sample_ordinals_dirty || reset_path_trace_payload);
     rtao_uniforms rtao_uniform_data = {
         .camera_pos = vx_float4_from_vec3(camera->position, 0.f),
         .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
@@ -2761,17 +2581,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         .render_height = height,
         .sample_index = 0u,
         .history_valid = (uint)(vxray_instance.rtao_history_valid && !reset_ao)};
-    path_tracer_index_uniforms const path_trace_index_uniform_data = {
-        .inverse_view_projection = vx_float4x4_from_mat4(inverse_view_projection),
-        .previous_view_projection = vxray_instance.path_trace_previous_view_projection,
-        .sp = vxray_instance.path_trace_sp,
-        .smin = vxray_instance.spatial_hash_smin,
-        .vertical_fov = fov,
-        .near_plane = near_plane,
-        .far_plane = far_plane,
-        .frame = vxray_instance.path_trace_frame,
-        .render_height = height,
-        .history_valid = (uint)(vxray_instance.path_trace_history_valid && !reset_path_trace_hash)};
     float const             sun_elevation = glm_rad(vxray_instance.sun_elevation_degrees);
     float const             sun_azimuth = glm_rad(vxray_instance.sun_azimuth_degrees);
     float const             cos_sun_elevation = cosf(sun_elevation);
@@ -2794,9 +2603,13 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
         .transmitted_sun_color =
             float4(transmitted_sun_color.x, transmitted_sun_color.y, transmitted_sun_color.z, 0.f),
         .grid_ext = vxray_instance.grid_ext,
-        .frame = vxray_instance.path_trace_frame};
+        .frame = vxray_instance.path_trace_frame,
+        .sp = vxray_instance.path_trace_sp,
+        .smin = vxray_instance.spatial_hash_smin,
+        .vertical_fov = fov,
+        .render_height = height};
 
-    if (reset_ao || reset_path_trace_payload || reset_path_trace_sample_ordinals)
+    if (reset_ao || reset_path_trace_payload)
     {
         SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
         assert(copy_pass);
@@ -2853,27 +2666,13 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                        .offset = 0,
                                        .size = path_trace_payload_buffer_size},
                 false);
+            SDL_UploadToGPUBuffer(
+                copy_pass, &reset_source,
+                &(SDL_GPUBufferRegion){.buffer = vxray_instance.path_trace_resolved_buffer,
+                                       .offset = 0,
+                                       .size = path_trace_payload_buffer_size},
+                false);
             vxray_instance.path_trace_lighting_dirty = false;
-        }
-        if (reset_path_trace_sample_ordinals)
-        {
-            uint32_t const size = (uint32_t)((uint64_t)width * height * sizeof(uint32_t));
-            uint32_t const reset_capacity =
-                (uint32_t)(4u * VX_PATH_TRACE_SPATIAL_HASH_CAPACITY * sizeof(uint32_t));
-            // Reuse the zero upload buffer, including when the image exceeds its capacity.
-            for (uint32_t offset = 0u; offset < size;)
-            {
-                uint32_t const chunk_size = SDL_min(size - offset, reset_capacity);
-                SDL_UploadToGPUBuffer(
-                    copy_pass, &reset_source,
-                    &(SDL_GPUBufferRegion){.buffer =
-                                               vxray_instance.path_trace_sample_ordinals_buffer,
-                                           .offset = offset,
-                                           .size = chunk_size},
-                    false);
-                offset += chunk_size;
-            }
-            vxray_instance.path_trace_sample_ordinals_dirty = false;
         }
         SDL_EndGPUCopyPass(copy_pass);
     }
@@ -2941,8 +2740,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_DrawGPUPrimitives(gbuffer_pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(gbuffer_pass);
 
-    uint32_t const current_history =
-        (render_rtao ? vxray_instance.rtao_frame_index : vxray_instance.path_trace_frame) & 1u;
+    uint32_t const current_history = vxray_instance.rtao_frame_index & 1u;
     uint32_t const previous_history = current_history ^ 1u;
     if (render_rtao)
     {
@@ -3026,49 +2824,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     }
     else
     {
-        // Reproject the previous path-trace spatial-cache index, falling back to hash lookup.
-
-        SDL_GPUColorTargetInfo const path_trace_index_target_info[] = {
-            {.texture = vxray_instance.path_trace_index_textures[current_history],
-             .load_op = SDL_GPU_LOADOP_DONT_CARE,
-             .store_op = SDL_GPU_STOREOP_STORE,
-             .cycle = true},
-            {.texture = vxray_instance.path_trace_checksum_textures[current_history],
-             .load_op = SDL_GPU_LOADOP_DONT_CARE,
-             .store_op = SDL_GPU_STOREOP_STORE,
-             .cycle = true}};
-        SDL_GPURenderPass* const path_trace_index_pass =
-            SDL_BeginGPURenderPass(cmd_buffer, path_trace_index_target_info,
-                                   SDL_arraysize(path_trace_index_target_info), 0);
-        assert(path_trace_index_pass);
-        SDL_BindGPUGraphicsPipeline(path_trace_index_pass,
-                                    vxray_instance.path_trace_index_pipeline);
-        SDL_GPUTextureSamplerBinding const path_trace_index_depth_binding = {
-            .texture = vxray_instance.gbuffer_depth_texture,
-            .sampler = vxray_instance.display_sampler};
-        SDL_BindGPUFragmentSamplers(path_trace_index_pass, 0, &path_trace_index_depth_binding, 1);
-        SDL_GPUTexture* const path_trace_index_storage_textures[] = {
-            vxray_instance.gbuffer_normal_texture,
-            vxray_instance.path_trace_index_textures[previous_history],
-            vxray_instance.path_trace_checksum_textures[previous_history],
-        };
-        SDL_BindGPUFragmentStorageTextures(path_trace_index_pass, 0,
-                                           path_trace_index_storage_textures,
-                                           SDL_arraysize(path_trace_index_storage_textures));
-        SDL_GPUBuffer* const path_trace_index_storage_buffers[] = {
-            vxray_instance.path_trace_checksum_buffer,
-            vxray_instance.path_trace_payload_buffer,
-            vxray_instance.path_trace_last_touched_frame_buffer,
-        };
-        SDL_BindGPUFragmentStorageBuffers(path_trace_index_pass, 0,
-                                          path_trace_index_storage_buffers,
-                                          SDL_arraysize(path_trace_index_storage_buffers));
-        SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &path_trace_index_uniform_data,
-                                       sizeof(path_trace_index_uniform_data));
-        SDL_DrawGPUPrimitives(path_trace_index_pass, 3, 1, 0, 0);
-        SDL_EndGPURenderPass(path_trace_index_pass);
-
-        // Scan all pixels; generate paths for bootstrap or the rotating tile schedule.
+        // Trace one cache-update path per rotating 4x4 tile.
 
         {
             SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
@@ -3082,15 +2838,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                                        .offset = 0,
                                        .size = sizeof(uint32_t)},
                 false);
-            SDL_UploadToGPUBuffer(
-                copy_pass,
-                &(SDL_GPUTransferBufferLocation){
-                    .transfer_buffer = vxray_instance.spatial_hash_reset_transfer_buffer,
-                    .offset = 0},
-                &(SDL_GPUBufferRegion){.buffer = vxray_instance.wavefront_path_count_buffer,
-                                       .offset = 0,
-                                       .size = sizeof(uint32_t)},
-                false);
             SDL_EndGPUCopyPass(copy_pass);
         }
 
@@ -3098,10 +2845,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
             {.buffer = vxray_instance.wavefront_ray_buffers[0], .cycle = false},
             {.buffer = vxray_instance.wavefront_path_state_buffer, .cycle = false},
             {.buffer = vxray_instance.wavefront_ray_count_buffers[0], .cycle = false},
-            {.buffer = vxray_instance.wavefront_path_indices_buffer, .cycle = false},
-            {.buffer = vxray_instance.wavefront_path_count_buffer, .cycle = false},
+            {.buffer = vxray_instance.path_trace_checksum_buffer, .cycle = false},
             {.buffer = vxray_instance.path_trace_payload_buffer, .cycle = false},
-            {.buffer = vxray_instance.path_trace_sample_ordinals_buffer, .cycle = false},
+            {.buffer = vxray_instance.path_trace_last_touched_frame_buffer, .cycle = false},
+            {.buffer = vxray_instance.path_trace_output_buffer, .cycle = false},
         };
         SDL_GPUComputePass* const generate_pass = SDL_BeginGPUComputePass(
             cmd_buffer, 0, 0, generate_buffer_bindings, SDL_arraysize(generate_buffer_bindings));
@@ -3112,18 +2859,24 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
             .sampler = vxray_instance.display_sampler};
         SDL_BindGPUComputeSamplers(generate_pass, 0, &generate_depth_binding, 1);
         SDL_GPUTexture* const generate_storage_textures[] = {
-            vxray_instance.path_trace_index_textures[current_history],
             vxray_instance.gbuffer_albedo_texture,
             vxray_instance.gbuffer_normal_texture,
         };
         SDL_BindGPUComputeStorageTextures(generate_pass, 0, generate_storage_textures,
                                           SDL_arraysize(generate_storage_textures));
+        path_trace_uniform_data.mode = VX_PATH_TRACE_MODE_UPDATE;
         SDL_PushGPUComputeUniformData(cmd_buffer, 0, &path_trace_uniform_data,
                                       sizeof(path_trace_uniform_data));
+        uint32_t const update_width =
+            (width + VX_PATH_TRACE_UPDATE_TILE_SIZE - 1u) / VX_PATH_TRACE_UPDATE_TILE_SIZE;
+        uint32_t const update_height =
+            (height + VX_PATH_TRACE_UPDATE_TILE_SIZE - 1u) / VX_PATH_TRACE_UPDATE_TILE_SIZE;
         uint32_t const screen_group_count_x =
-            (width + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) / VX_WAVEFRONT_SCREEN_THREAD_COUNT;
+            (update_width + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) /
+            VX_WAVEFRONT_SCREEN_THREAD_COUNT;
         uint32_t const screen_group_count_y =
-            (height + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) / VX_WAVEFRONT_SCREEN_THREAD_COUNT;
+            (update_height + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) /
+            VX_WAVEFRONT_SCREEN_THREAD_COUNT;
         SDL_DispatchGPUCompute(generate_pass, screen_group_count_x, screen_group_count_y, 1);
         SDL_EndGPUComputePass(generate_pass);
 
@@ -3164,6 +2917,10 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                 {.buffer = vxray_instance.wavefront_ray_count_buffers[output_index],
                  .cycle = false},
                 {.buffer = vxray_instance.wavefront_path_state_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_checksum_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_payload_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_last_touched_frame_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_output_buffer, .cycle = false},
             };
             SDL_GPUComputePass* const extend_pass = SDL_BeginGPUComputePass(
                 cmd_buffer, 0, 0, extend_buffer_bindings, SDL_arraysize(extend_buffer_bindings));
@@ -3176,7 +2933,7 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
                 vxray_instance.palette_buffer,
                 vxray_instance.wavefront_ray_buffers[input_index],
                 vxray_instance.wavefront_ray_count_buffers[input_index],
-                vxray_instance.path_trace_sample_ordinals_buffer,
+                vxray_instance.path_trace_resolved_buffer,
             };
             SDL_BindGPUComputeStorageBuffers(extend_pass, 0, extend_storage_buffers,
                                              SDL_arraysize(extend_storage_buffers));
@@ -3188,44 +2945,114 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
             SDL_EndGPUComputePass(extend_pass);
         }
 
-        // Prepare and dispatch accumulation for the compacted accepted-path queue.
+        // Resolve this frame's sparse updates into stable cache data, then clear accumulation.
 
-        SDL_GPUStorageBufferReadWriteBinding const prepare_accumulate_buffer_bindings[] = {
-            {.buffer = vxray_instance.wavefront_indirect_dispatch_buffer, .cycle = false},
+        SDL_GPUStorageBufferReadWriteBinding const resolve_buffer_bindings[] = {
+            {.buffer = vxray_instance.path_trace_checksum_buffer, .cycle = false},
+            {.buffer = vxray_instance.path_trace_payload_buffer, .cycle = false},
+            {.buffer = vxray_instance.path_trace_resolved_buffer, .cycle = false},
+            {.buffer = vxray_instance.path_trace_last_touched_frame_buffer, .cycle = false},
         };
-        SDL_GPUComputePass* const prepare_accumulate_pass =
-            SDL_BeginGPUComputePass(cmd_buffer, 0, 0, prepare_accumulate_buffer_bindings,
-                                    SDL_arraysize(prepare_accumulate_buffer_bindings));
-        assert(prepare_accumulate_pass);
-        SDL_BindGPUComputePipeline(prepare_accumulate_pass,
-                                   vxray_instance.wavefront_prepare_accumulate_pipeline);
-        SDL_GPUBuffer* const path_count_buffer = vxray_instance.wavefront_path_count_buffer;
-        SDL_BindGPUComputeStorageBuffers(prepare_accumulate_pass, 0, &path_count_buffer, 1);
-        SDL_DispatchGPUCompute(prepare_accumulate_pass, 1, 1, 1);
-        SDL_EndGPUComputePass(prepare_accumulate_pass);
+        SDL_GPUComputePass* const resolve_pass = SDL_BeginGPUComputePass(
+            cmd_buffer, 0, 0, resolve_buffer_bindings, SDL_arraysize(resolve_buffer_bindings));
+        assert(resolve_pass);
+        SDL_BindGPUComputePipeline(resolve_pass, vxray_instance.wavefront_accumulate_pipeline);
+        SDL_PushGPUComputeUniformData(cmd_buffer, 0, &path_trace_uniform_data,
+                                      sizeof(path_trace_uniform_data));
+        uint32_t const resolve_group_count =
+            (VX_PATH_TRACE_SPATIAL_HASH_CAPACITY + VX_WAVEFRONT_EXTEND_THREAD_COUNT - 1u) /
+            VX_WAVEFRONT_EXTEND_THREAD_COUNT;
+        SDL_DispatchGPUCompute(resolve_pass, resolve_group_count, 1, 1);
+        SDL_EndGPUComputePass(resolve_pass);
 
-        // Accumulate the completed paths into the spatial cache.
+        // Start one full-resolution query path at each visible G-buffer surface.
 
-        SDL_GPUStorageBufferReadWriteBinding const accumulate_buffer_binding = {
-            .buffer = vxray_instance.path_trace_payload_buffer, .cycle = false};
-        SDL_GPUComputePass* const accumulate_pass =
-            SDL_BeginGPUComputePass(cmd_buffer, 0, 0, &accumulate_buffer_binding, 1);
-        assert(accumulate_pass);
-        SDL_BindGPUComputePipeline(accumulate_pass, vxray_instance.wavefront_accumulate_pipeline);
-        SDL_GPUTexture* const accumulate_storage_textures[] = {
-            vxray_instance.gbuffer_albedo_texture};
-        SDL_BindGPUComputeStorageTextures(accumulate_pass, 0, accumulate_storage_textures,
-                                          SDL_arraysize(accumulate_storage_textures));
-        SDL_GPUBuffer* const accumulate_storage_buffers[] = {
-            vxray_instance.wavefront_path_indices_buffer,
-            vxray_instance.wavefront_path_state_buffer,
-            vxray_instance.wavefront_path_count_buffer,
-        };
-        SDL_BindGPUComputeStorageBuffers(accumulate_pass, 0, accumulate_storage_buffers,
-                                         SDL_arraysize(accumulate_storage_buffers));
-        SDL_DispatchGPUComputeIndirect(accumulate_pass,
-                                       vxray_instance.wavefront_indirect_dispatch_buffer, 0);
-        SDL_EndGPUComputePass(accumulate_pass);
+        {
+            SDL_GPUCopyPass* const copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
+            assert(copy_pass);
+            SDL_UploadToGPUBuffer(
+                copy_pass,
+                &(SDL_GPUTransferBufferLocation){
+                    .transfer_buffer = vxray_instance.spatial_hash_reset_transfer_buffer,
+                    .offset = 0},
+                &(SDL_GPUBufferRegion){.buffer = vxray_instance.wavefront_ray_count_buffers[0],
+                                       .offset = 0,
+                                       .size = sizeof(uint32_t)},
+                false);
+            SDL_EndGPUCopyPass(copy_pass);
+        }
+
+        SDL_GPUComputePass* const query_generate_pass = SDL_BeginGPUComputePass(
+            cmd_buffer, 0, 0, generate_buffer_bindings, SDL_arraysize(generate_buffer_bindings));
+        assert(query_generate_pass);
+        SDL_BindGPUComputePipeline(query_generate_pass, vxray_instance.wavefront_generate_pipeline);
+        SDL_BindGPUComputeSamplers(query_generate_pass, 0, &generate_depth_binding, 1);
+        SDL_BindGPUComputeStorageTextures(query_generate_pass, 0, generate_storage_textures,
+                                          SDL_arraysize(generate_storage_textures));
+        path_trace_uniform_data.mode = VX_PATH_TRACE_MODE_QUERY;
+        path_trace_uniform_data.bounce = 0u;
+        SDL_PushGPUComputeUniformData(cmd_buffer, 0, &path_trace_uniform_data,
+                                      sizeof(path_trace_uniform_data));
+        uint32_t const query_group_count_x =
+            (width + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) / VX_WAVEFRONT_SCREEN_THREAD_COUNT;
+        uint32_t const query_group_count_y =
+            (height + VX_WAVEFRONT_SCREEN_THREAD_COUNT - 1u) / VX_WAVEFRONT_SCREEN_THREAD_COUNT;
+        SDL_DispatchGPUCompute(query_generate_pass, query_group_count_x, query_group_count_y, 1);
+        SDL_EndGPUComputePass(query_generate_pass);
+
+        for (uint32_t bounce = 1u; bounce <= VX_PATH_TRACE_BOUNCE_COUNT; ++bounce)
+        {
+            uint32_t const input_index = (bounce - 1u) & 1u;
+            uint32_t const output_index = input_index ^ 1u;
+
+            SDL_GPUStorageBufferReadWriteBinding const prepare_buffer_bindings[] = {
+                {.buffer = vxray_instance.wavefront_ray_count_buffers[output_index],
+                 .cycle = false},
+                {.buffer = vxray_instance.wavefront_indirect_dispatch_buffer, .cycle = false},
+            };
+            SDL_GPUComputePass* const prepare_pass = SDL_BeginGPUComputePass(
+                cmd_buffer, 0, 0, prepare_buffer_bindings, SDL_arraysize(prepare_buffer_bindings));
+            assert(prepare_pass);
+            SDL_BindGPUComputePipeline(prepare_pass,
+                                       vxray_instance.wavefront_prepare_extend_pipeline);
+            SDL_GPUBuffer* const input_count_buffer =
+                vxray_instance.wavefront_ray_count_buffers[input_index];
+            SDL_BindGPUComputeStorageBuffers(prepare_pass, 0, &input_count_buffer, 1);
+            SDL_DispatchGPUCompute(prepare_pass, 1, 1, 1);
+            SDL_EndGPUComputePass(prepare_pass);
+
+            SDL_GPUStorageBufferReadWriteBinding const extend_buffer_bindings[] = {
+                {.buffer = vxray_instance.wavefront_ray_buffers[output_index], .cycle = false},
+                {.buffer = vxray_instance.wavefront_ray_count_buffers[output_index],
+                 .cycle = false},
+                {.buffer = vxray_instance.wavefront_path_state_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_checksum_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_payload_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_last_touched_frame_buffer, .cycle = false},
+                {.buffer = vxray_instance.path_trace_output_buffer, .cycle = false},
+            };
+            SDL_GPUComputePass* const extend_pass = SDL_BeginGPUComputePass(
+                cmd_buffer, 0, 0, extend_buffer_bindings, SDL_arraysize(extend_buffer_bindings));
+            assert(extend_pass);
+            SDL_BindGPUComputePipeline(extend_pass, vxray_instance.wavefront_extend_pipeline);
+            SDL_BindGPUComputeSamplers(extend_pass, 0, &extend_sky_binding, 1);
+            SDL_BindGPUComputeStorageTextures(extend_pass, 0, extend_storage_textures,
+                                              SDL_arraysize(extend_storage_textures));
+            SDL_GPUBuffer* const extend_storage_buffers[] = {
+                vxray_instance.palette_buffer,
+                vxray_instance.wavefront_ray_buffers[input_index],
+                vxray_instance.wavefront_ray_count_buffers[input_index],
+                vxray_instance.path_trace_resolved_buffer,
+            };
+            SDL_BindGPUComputeStorageBuffers(extend_pass, 0, extend_storage_buffers,
+                                             SDL_arraysize(extend_storage_buffers));
+            path_trace_uniform_data.bounce = bounce;
+            SDL_PushGPUComputeUniformData(cmd_buffer, 0, &path_trace_uniform_data,
+                                          sizeof(path_trace_uniform_data));
+            SDL_DispatchGPUComputeIndirect(extend_pass,
+                                           vxray_instance.wavefront_indirect_dispatch_buffer, 0);
+            SDL_EndGPUComputePass(extend_pass);
+        }
     }
 
     // Display the selected intermediate texture on the swapchain.
@@ -3250,12 +3077,11 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     SDL_GPUTexture* const display_storage_textures[] = {
         vxray_instance.gbuffer_albedo_texture,
         vxray_instance.gbuffer_normal_texture,
-        render_rtao ? vxray_instance.rtao_index_textures[current_history]
-                    : vxray_instance.path_trace_index_textures[current_history],
+        vxray_instance.rtao_index_textures[current_history],
     };
     SDL_BindGPUFragmentStorageTextures(render_pass, 0, display_storage_textures,
                                        SDL_arraysize(display_storage_textures));
-    SDL_GPUBuffer* const display_storage_buffers[] = {vxray_instance.path_trace_payload_buffer};
+    SDL_GPUBuffer* const display_storage_buffers[] = {vxray_instance.path_trace_output_buffer};
     SDL_BindGPUFragmentStorageBuffers(render_pass, 0, display_storage_buffers,
                                       SDL_arraysize(display_storage_buffers));
     float const            exposure = 1.f / powf(2.f, -(float)vxray_instance.exposure_stop);
@@ -3289,8 +3115,6 @@ SDL_AppResult SDL_AppIterate(void* const appstate)
     }
     else
     {
-        vxray_instance.path_trace_previous_view_projection = view_projection_data;
-        vxray_instance.path_trace_history_valid = true;
         vxray_instance.path_trace_frame = vxray_instance.path_trace_frame == UINT32_MAX
                                               ? 1u
                                               : vxray_instance.path_trace_frame + 1u;
@@ -3325,6 +3149,12 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.path_trace_payload_buffer = 0;
     }
 
+    if (vxray_instance.path_trace_resolved_buffer)
+    {
+        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.path_trace_resolved_buffer);
+        vxray_instance.path_trace_resolved_buffer = 0;
+    }
+
     if (vxray_instance.path_trace_last_touched_frame_buffer)
     {
         SDL_ReleaseGPUBuffer(vxray_instance.gpu_device,
@@ -3351,24 +3181,10 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.wavefront_path_state_buffer = 0;
     }
 
-    if (vxray_instance.path_trace_sample_ordinals_buffer)
+    if (vxray_instance.path_trace_output_buffer)
     {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device,
-                             vxray_instance.path_trace_sample_ordinals_buffer);
-        vxray_instance.path_trace_sample_ordinals_buffer = 0;
-    }
-
-    if (vxray_instance.wavefront_path_count_buffer)
-    {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.wavefront_path_count_buffer);
-        vxray_instance.wavefront_path_count_buffer = 0;
-    }
-
-    if (vxray_instance.wavefront_path_indices_buffer)
-    {
-        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device,
-                             vxray_instance.wavefront_path_indices_buffer);
-        vxray_instance.wavefront_path_indices_buffer = 0;
+        SDL_ReleaseGPUBuffer(vxray_instance.gpu_device, vxray_instance.path_trace_output_buffer);
+        vxray_instance.path_trace_output_buffer = 0;
     }
 
     for (uint32_t i = 0u; i < 2u; ++i)
@@ -3467,18 +3283,6 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
             SDL_ReleaseGPUTexture(vxray_instance.gpu_device, vxray_instance.rtao_index_textures[i]);
             vxray_instance.rtao_index_textures[i] = 0;
         }
-        if (vxray_instance.path_trace_checksum_textures[i])
-        {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device,
-                                  vxray_instance.path_trace_checksum_textures[i]);
-            vxray_instance.path_trace_checksum_textures[i] = 0;
-        }
-        if (vxray_instance.path_trace_index_textures[i])
-        {
-            SDL_ReleaseGPUTexture(vxray_instance.gpu_device,
-                                  vxray_instance.path_trace_index_textures[i]);
-            vxray_instance.path_trace_index_textures[i] = 0;
-        }
     }
 
     if (vxray_instance.rtao_visibility_texture)
@@ -3557,25 +3361,11 @@ void SDL_AppQuit(void* const appstate, SDL_AppResult const result)
         vxray_instance.wavefront_prepare_extend_pipeline = 0;
     }
 
-    if (vxray_instance.wavefront_prepare_accumulate_pipeline)
-    {
-        SDL_ReleaseGPUComputePipeline(vxray_instance.gpu_device,
-                                      vxray_instance.wavefront_prepare_accumulate_pipeline);
-        vxray_instance.wavefront_prepare_accumulate_pipeline = 0;
-    }
-
     if (vxray_instance.wavefront_generate_pipeline)
     {
         SDL_ReleaseGPUComputePipeline(vxray_instance.gpu_device,
                                       vxray_instance.wavefront_generate_pipeline);
         vxray_instance.wavefront_generate_pipeline = 0;
-    }
-
-    if (vxray_instance.path_trace_index_pipeline)
-    {
-        SDL_ReleaseGPUGraphicsPipeline(vxray_instance.gpu_device,
-                                       vxray_instance.path_trace_index_pipeline);
-        vxray_instance.path_trace_index_pipeline = 0;
     }
 
     if (vxray_instance.sky_view_pipeline)
